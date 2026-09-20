@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 
 type StopType = "start" | "destination" | "camp" | "fuel" | "attraction";
 type Stop = { id: number; type: StopType; title: string; subtitle: string; miles: number; meta: string; day: number; elevation?: number };
@@ -54,6 +55,7 @@ export default function Home() {
   const [researchArea, setResearchArea] = useState("All");
   const [savedResearch, setSavedResearch] = useState<number[]>([1, 3, 6]);
   const [routeAlert, setRouteAlert] = useState(true);
+  const [saveMessage, setSaveMessage] = useState("");
   const [days, setDays] = useState<DayPlan[]>([
     { day: 1, label: "Travel Day", destination: "Colorado / Wyoming", maxHours: 6, overnight: "Medicine Lodge area" },
     { day: 2, label: "Yellowstone", destination: "Yellowstone National Park", maxHours: 4, overnight: "Jardine area" },
@@ -75,6 +77,29 @@ export default function Home() {
     stops.forEach((s) => map.set(s.day, [...(map.get(s.day) || []), s]));
     return [...map.entries()].sort((a, b) => a[0] - b[0]);
   }, [stops]);
+
+  async function saveTripToSupabase() {
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
+      setSaveMessage("Supabase is not connected yet. Add the two environment variables in Vercel.");
+      return;
+    }
+    setSaveMessage("Saving trip…");
+    const supabase = createClient();
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) {
+      setSaveMessage("Database is connected, but you are not signed in. Auth will be added to the next pass.");
+      return;
+    }
+    const { data: trip, error } = await supabase.from("trips").insert({
+      user_id: auth.user.id, name: tripName, start_location: start,
+      destinations: destinations.split(",").map((x) => x.trim()).filter(Boolean),
+      mpg, tank_gallons: tank, fuel_reserve_percent: fuelReserve,
+      daily_driving_hours: dailyHours, camping_style: campingStyle, planning_gas_price: gasPrice
+    }).select().single();
+    if (error || !trip) { setSaveMessage(error?.message || "Unable to save trip."); return; }
+    const { error: dayError } = await supabase.from("trip_days").insert(days.map((d) => ({ trip_id: trip.id, day_number: d.day, label: d.label, destination: d.destination, max_hours: d.maxHours, overnight: d.overnight })));
+    setSaveMessage(dayError ? `Trip saved, but days failed: ${dayError.message}` : "Trip saved to Supabase.");
+  }
 
   function createTrip() {
     const names = destinations.split(",").map((x) => x.trim()).filter(Boolean);
@@ -124,8 +149,8 @@ export default function Home() {
       </aside>
 
       <section className="main-content">
-        <header className="topbar"><div><span className="breadcrumb">TRIPS / {tripName.toUpperCase()}</span><h1>{activeTab}</h1></div><div className="header-actions"><button className="ghost-button" onClick={() => setActiveTab("Overview")}>Dashboard</button><button className="primary-button" onClick={() => setShowPlanner(true)}>＋ Build Trip</button></div></header>
-        <div className="content">
+        <header className="topbar"><div><span className="breadcrumb">TRIPS / {tripName.toUpperCase()}</span><h1>{activeTab}</h1></div><div className="header-actions"><button className="ghost-button" onClick={() => setActiveTab("Overview")}>Dashboard</button><button className="ghost-button" onClick={saveTripToSupabase}>Save to Supabase</button><button className="primary-button" onClick={() => setShowPlanner(true)}>＋ Build Trip</button></div></header>
+        <div className="content">{saveMessage && <div className="save-banner">{saveMessage}</div>}
           {activeTab === "Overview" && <Overview totalMiles={totalMiles} fuelCost={fuelCost} usableRange={usableRange} fullRange={fullRange} tripBudget={tripBudget} fuelReserve={fuelReserve} setFuelReserve={setFuelReserve} stops={stops} setActiveTab={setActiveTab} days={days} routeAlert={routeAlert} setRouteAlert={setRouteAlert} />}
           {activeTab === "Route" && <RouteView stops={stops} totalMiles={totalMiles} days={days} addDay={addDay} updateDay={updateDay} usableRange={usableRange} routeAlert={routeAlert} setRouteAlert={setRouteAlert} groupedDays={groupedDays} />}
           {activeTab === "Research" && <ResearchView candidates={filteredCandidates} researchType={researchType} setResearchType={setResearchType} researchArea={researchArea} setResearchArea={setResearchArea} saved={saved} savedResearch={savedResearch} toggleSaved={toggleSaved} addCandidate={addCandidate} />}
