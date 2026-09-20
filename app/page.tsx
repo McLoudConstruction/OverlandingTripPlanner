@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 type StopType = "start" | "destination" | "camp" | "fuel" | "attraction";
@@ -56,6 +56,13 @@ export default function Home() {
   const [savedResearch, setSavedResearch] = useState<number[]>([1, 3, 6]);
   const [routeAlert, setRouteAlert] = useState(true);
   const [saveMessage, setSaveMessage] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [showAuth, setShowAuth] = useState(false);
+  const [showTrips, setShowTrips] = useState(false);
+  const [savedTripId, setSavedTripId] = useState<string | null>(null);
+  const [savedTrips, setSavedTrips] = useState<Array<{ id: string; name: string; created_at: string; start_location: string | null }>>([]);
   const [days, setDays] = useState<DayPlan[]>([
     { day: 1, label: "Travel Day", destination: "Colorado / Wyoming", maxHours: 6, overnight: "Medicine Lodge area" },
     { day: 2, label: "Yellowstone", destination: "Yellowstone National Park", maxHours: 4, overnight: "Jardine area" },
@@ -72,6 +79,22 @@ export default function Home() {
   const filteredCandidates = candidates.filter((c) => (researchType === "All" || c.type === researchType) && (researchArea === "All" || c.area.includes(researchArea)));
   const saved = candidates.filter((c) => savedResearch.includes(c.id));
 
+  useEffect(() => {
+    const supabase = createClient();
+    let mounted = true;
+    supabase.auth.getUser().then(({ data }) => {
+      if (!mounted) return;
+      setUserEmail(data.user?.email ?? "");
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!mounted) return;
+      setUserEmail(session?.user?.email ?? "");
+      setAuthLoading(false);
+    });
+    return () => { mounted = false; listener.subscription.unsubscribe(); };
+  }, []);
+
   const groupedDays = useMemo(() => {
     const map = new Map<number, Stop[]>();
     stops.forEach((s) => map.set(s.day, [...(map.get(s.day) || []), s]));
@@ -83,22 +106,74 @@ export default function Home() {
       setSaveMessage("Supabase is not connected yet. Add the two environment variables in Vercel.");
       return;
     }
-    setSaveMessage("Saving trip…");
     const supabase = createClient();
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) {
-      setSaveMessage("Database is connected, but you are not signed in. Auth will be added to the next pass.");
+      setShowAuth(true);
+      setSaveMessage("Sign in or create an account to save trips.");
       return;
     }
-    const { data: trip, error } = await supabase.from("trips").insert({
+    setSaveMessage("Saving trip…");
+    const payload = {
       user_id: auth.user.id, name: tripName, start_location: start,
       destinations: destinations.split(",").map((x) => x.trim()).filter(Boolean),
       mpg, tank_gallons: tank, fuel_reserve_percent: fuelReserve,
       daily_driving_hours: dailyHours, camping_style: campingStyle, planning_gas_price: gasPrice
-    }).select().single();
-    if (error || !trip) { setSaveMessage(error?.message || "Unable to save trip."); return; }
-    const { error: dayError } = await supabase.from("trip_days").insert(days.map((d) => ({ trip_id: trip.id, day_number: d.day, label: d.label, destination: d.destination, max_hours: d.maxHours, overnight: d.overnight })));
+    };
+    let tripId = savedTripId;
+    let error: any = null;
+    if (tripId) {
+      const result = await supabase.from("trips").update(payload).eq("id", tripId).select().single();
+      error = result.error;
+    } else {
+      const result = await supabase.from("trips").insert(payload).select().single();
+      error = result.error;
+      if (result.data) tripId = result.data.id;
+    }
+    if (error || !tripId) { setSaveMessage(error?.message || "Unable to save trip."); return; }
+    await supabase.from("trip_days").delete().eq("trip_id", tripId);
+    const { error: dayError } = await supabase.from("trip_days").insert(days.map((d) => ({ trip_id: tripId, day_number: d.day, label: d.label, destination: d.destination, max_hours: d.maxHours, overnight: d.overnight })));
+    setSavedTripId(tripId);
     setSaveMessage(dayError ? `Trip saved, but days failed: ${dayError.message}` : "Trip saved to Supabase.");
+  }
+
+  async function loadTrips() {
+    const supabase = createClient();
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) { setShowAuth(true); return; }
+    const { data, error } = await supabase.from("trips").select("id,name,created_at,start_location").order("created_at", { ascending: false });
+    if (error) { setSaveMessage(error.message); return; }
+    setSavedTrips(data ?? []);
+    setShowTrips(true);
+  }
+
+  async function loadTrip(id: string) {
+    const supabase = createClient();
+    const { data: trip, error } = await supabase.from("trips").select("*").eq("id", id).single();
+    if (error || !trip) { setSaveMessage(error?.message || "Unable to load trip."); return; }
+    const { data: dbDays } = await supabase.from("trip_days").select("day_number,label,destination,max_hours,overnight").eq("trip_id", id).order("day_number");
+    setTripName(trip.name || "Untitled Trip");
+    setStart(trip.start_location || "");
+    setDestinations((trip.destinations || []).join(", "));
+    setMpg(Number(trip.mpg || 15));
+    setTank(Number(trip.tank_gallons || 36));
+    setFuelReserve(Number(trip.fuel_reserve_percent ?? 15));
+    setDailyHours(Number(trip.daily_driving_hours || 6));
+    setCampingStyle(trip.camping_style || "Dispersed / primitive");
+    setGasPrice(Number(trip.planning_gas_price || 3.57));
+    if (dbDays?.length) setDays(dbDays.map((d) => ({ day: d.day_number, label: d.label || "Explore", destination: d.destination || "", maxHours: Number(d.max_hours || 6), overnight: d.overnight || "TBD" })));
+    setSavedTripId(id);
+    setShowTrips(false);
+    setActiveTab("Overview");
+    setSaveMessage("Trip loaded from Supabase.");
+  }
+
+  async function signOut() {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    setSavedTripId(null);
+    setSavedTrips([]);
+    setSaveMessage("Signed out.");
   }
 
   function createTrip() {
@@ -149,7 +224,7 @@ export default function Home() {
       </aside>
 
       <section className="main-content">
-        <header className="topbar"><div><span className="breadcrumb">TRIPS / {tripName.toUpperCase()}</span><h1>{activeTab}</h1></div><div className="header-actions"><button className="ghost-button" onClick={() => setActiveTab("Overview")}>Dashboard</button><button className="ghost-button" onClick={saveTripToSupabase}>Save to Supabase</button><button className="primary-button" onClick={() => setShowPlanner(true)}>＋ Build Trip</button></div></header>
+        <header className="topbar"><div><span className="breadcrumb">TRIPS / {tripName.toUpperCase()}</span><h1>{activeTab}</h1></div><div className="header-actions"><button className="ghost-button" onClick={() => setActiveTab("Overview")}>Dashboard</button>{userEmail ? <><button className="ghost-button" onClick={loadTrips}>My Trips</button><button className="ghost-button" onClick={signOut} title={userEmail}>{userEmail.split("@")[0]} · Sign out</button></> : <button className="ghost-button" onClick={() => setShowAuth(true)}>{authLoading ? "Checking…" : "Sign in"}</button>}<button className="primary-button" onClick={saveTripToSupabase}>Save Trip</button><button className="primary-button" onClick={() => setShowPlanner(true)}>＋ Build Trip</button></div></header>
         <div className="content">{saveMessage && <div className="save-banner">{saveMessage}</div>}
           {activeTab === "Overview" && <Overview totalMiles={totalMiles} fuelCost={fuelCost} usableRange={usableRange} fullRange={fullRange} tripBudget={tripBudget} fuelReserve={fuelReserve} setFuelReserve={setFuelReserve} stops={stops} setActiveTab={setActiveTab} days={days} routeAlert={routeAlert} setRouteAlert={setRouteAlert} />}
           {activeTab === "Route" && <RouteView stops={stops} totalMiles={totalMiles} days={days} addDay={addDay} updateDay={updateDay} usableRange={usableRange} routeAlert={routeAlert} setRouteAlert={setRouteAlert} groupedDays={groupedDays} />}
@@ -162,9 +237,39 @@ export default function Home() {
         </div>
       </section>
 
+      {showAuth && <AuthModal onClose={() => setShowAuth(false)} onSuccess={() => setShowAuth(false)} setSaveMessage={setSaveMessage} />}
+      {showTrips && <div className="modal-backdrop" onClick={() => setShowTrips(false)}><div className="modal trip-list-modal" onClick={(e) => e.stopPropagation()}><button className="close" onClick={() => setShowTrips(false)}>×</button><span className="eyebrow">YOUR TRIPS</span><h2>Saved adventures</h2><p>Trips saved to your Supabase account appear here.</p>{savedTrips.length ? savedTrips.map((trip) => <button className="trip-list-row" key={trip.id} onClick={() => loadTrip(trip.id)}><span>↟</span><div><strong>{trip.name}</strong><small>{trip.start_location || "Starting point not set"} · {new Date(trip.created_at).toLocaleDateString()}</small></div><b>Load →</b></button>) : <div className="empty">No saved trips yet. Build a trip and hit Save Trip.</div>}</div></div>}
       {showPlanner && <div className="modal-backdrop" onClick={() => setShowPlanner(false)}><div className="modal wide-modal" onClick={(e) => e.stopPropagation()}><button className="close" onClick={() => setShowPlanner(false)}>×</button><span className="eyebrow">NEW TRIP</span><h2>Start with the route.</h2><p>These inputs become the planning rules the research engine will use for campsites, fuel, attractions and hikes.</p><div className="form-grid"><label>Trip name<input value={tripName} onChange={(e) => setTripName(e.target.value)} placeholder="e.g. Colorado Backcountry 2027" /></label><label>Starting point<input value={start} onChange={(e) => setStart(e.target.value)} placeholder="Kansas City, MO" /></label><label className="wide">Destinations<input value={destinations} onChange={(e) => setDestinations(e.target.value)} placeholder="Yellowstone, Grand Teton, Black Hills" /></label><label>Vehicle MPG<input type="number" min="1" value={mpg} onChange={(e) => setMpg(Number(e.target.value))} /></label><label>Tank size (gal)<input type="number" min="1" value={tank} onChange={(e) => setTank(Number(e.target.value))} /></label><label>Daily driving limit<select value={dailyHours} onChange={(e) => setDailyHours(Number(e.target.value))}>{[3,4,5,6,7,8,9,10].map((h) => <option key={h} value={h}>{h} hours</option>)}</select></label><label>Camping style<select value={campingStyle} onChange={(e) => setCampingStyle(e.target.value)}><option>Dispersed / primitive</option><option>Established campground</option><option>Either</option></select></label></div><div className="planner-preview"><div><b>Safe range</b><span>{usableRange} mi</span></div><div><b>Fuel estimate</b><span>${Math.round(fuelCost)}</span></div><div><b>Research candidates</b><span>{candidates.length}</span></div></div><button className="primary-button full" onClick={createTrip}>Build this trip →</button></div></div>}
     </main>
   );
+}
+
+function AuthModal({ onClose, onSuccess, setSaveMessage }: { onClose: () => void; onSuccess: () => void; setSaveMessage: (message: string) => void }) {
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setError("");
+    const supabase = createClient();
+    const result = mode === "signin"
+      ? await supabase.auth.signInWithPassword({ email, password })
+      : await supabase.auth.signUp({ email, password, options: { emailRedirectTo: `${window.location.origin}/auth/callback` } });
+    setBusy(false);
+    if (result.error) { setError(result.error.message); return; }
+    if (mode === "signup" && !result.data.session) {
+      setSaveMessage("Account created. Check your email to confirm your account, then sign in.");
+      onClose();
+      return;
+    }
+    setSaveMessage(mode === "signup" ? "Account created and signed in." : "Signed in.");
+    onSuccess();
+  }
+
+  return <div className="modal-backdrop" onClick={onClose}><div className="modal auth-modal" onClick={(e) => e.stopPropagation()}><button className="close" onClick={onClose}>×</button><span className="eyebrow">OVERLAND PLANNER ACCOUNT</span><h2>{mode === "signin" ? "Welcome back." : "Create your account."}</h2><p>Save trips, routes and planning details so they are available when you come back.</p><form onSubmit={submit}><label>Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" /></label><label>Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} autoComplete={mode === "signin" ? "current-password" : "new-password"} /></label>{error && <div className="auth-error">{error}</div>}<button className="primary-button full" disabled={busy}>{busy ? "Working…" : mode === "signin" ? "Sign in" : "Create account"}</button></form><button className="auth-switch" onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); }}>{mode === "signin" ? "Need an account? Create one" : "Already have an account? Sign in"}</button></div></div>;
 }
 
 function Overview({ totalMiles, fuelCost, usableRange, fullRange, tripBudget, fuelReserve, setFuelReserve, stops, setActiveTab, days, routeAlert, setRouteAlert }: any) {

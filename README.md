@@ -1,6 +1,6 @@
-# Overland Planner — MVP 0.4
+# Overland Planner — MVP 0.5
 
-Version 0.4 establishes the real data foundation without making the product dependent on paid AI or undocumented third-party scraping.
+Version 0.5 establishes the real data foundation without making the product dependent on paid AI or undocumented third-party scraping.
 
 ## Stack
 - Next.js + React + TypeScript
@@ -35,3 +35,14 @@ This version does not scrape or bulk-copy iOverlander, GasBuddy or other third-p
 npm install
 npm run dev
 ```
+
+
+## MVP 0.5 changes
+- Added email/password Supabase authentication UI.
+- Added Next.js 15-compatible `middleware.ts` for Supabase session refresh.
+- Added `/auth/callback` for email confirmation / PKCE callback handling.
+- Added Save Trip, My Trips, Load Trip, and Sign Out controls.
+- Saving an existing trip updates it instead of creating a duplicate.
+- Trip days are replaced on save so edits stay synchronized.
+
+After deploying, add the same Supabase environment variables from `.env.example` to Vercel. In Supabase Auth settings, make sure your site's URL is configured. If email confirmation is enabled, new users will receive a confirmation email.
