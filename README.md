@@ -1,4 +1,4 @@
-# Overland Planner MVP 0.7
+# Overland Planner MVP 0.7.2
 
 Focused trip logistics app built around:
 - personal campsite library with List / Map views
@@ -9,6 +9,7 @@ Focused trip logistics app built around:
 - editable $/gal price cushion and mileage reserve
 - simple trip budget and reusable pack list
 - Supabase persistence and authentication
+- Google Maps Saved CSV importer with review, coordinate lookup, duplicate detection, skip/delete controls
 
 ## Deploy
 
@@ -43,3 +44,16 @@ Mapbox is used for maps, multi-stop driving routes, reverse geocoding route stop
 ## Product boundary
 
 The app intentionally does not research campsites, attractions, hikes, or activities. Find campsites wherever you prefer, then save the useful ones into your personal library. iOverlander can remain part of that external research workflow.
+
+## Campsite importer
+
+The Campsites page now includes **Import from Google Maps**. Google Takeout currently exports Saved lists through the Saved product; the exported CSV commonly contains Title, Note, URL, and Comment fields rather than native coordinates. The importer accepts one or several CSV files, attempts to locate entries with Mapbox when coordinates are not present, and gives you a review screen before anything is saved.
+
+Before importing, you can:
+- uncheck places you do not want
+- Skip individual saved places
+- edit the name, area, type, latitude, or longitude
+- open the original Google Maps link to verify a location
+- review possible duplicates
+
+Saved campsites can be deleted from the campsite list or from the edit screen.
