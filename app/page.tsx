@@ -192,7 +192,9 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
     setBusy(true);setError("");setFileName(files.map(f=>f.name).join(", "));
     try{
       const parsedGroups=await Promise.all(files.map(async file=>({file,rows:parseCsv(await file.text())})));
-      const parsed=parsedGroups.flatMap(g=>g.rows.map(r=>({...r,__sourceFile:g.file.name})));
+      const parsed: Array<Record<string,string> & {__sourceFile:string}> = parsedGroups.reduce((all,g)=>{
+        return all.concat(g.rows.map((r:Record<string,string>)=>({...r,__sourceFile:g.file.name})));
+      }, [] as Array<Record<string,string> & {__sourceFile:string}>);
       if(!parsed.length)throw new Error("No saved places were found in those CSV files.");
       const candidates=parsed.map((r,i)=>{
         const name=(r.title||r.name||r.saved_place||r.place||r.label||`Saved place ${i+1}`).trim();
