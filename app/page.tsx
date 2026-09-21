@@ -2,307 +2,83 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import Map from "./map";
 
-type StopType = "start" | "destination" | "camp" | "fuel" | "attraction";
-type Stop = { id: number; type: StopType; title: string; subtitle: string; miles: number; meta: string; day: number; elevation?: number };
-type DayPlan = { day: number; label: string; destination: string; maxHours: number; overnight: string };
-type Candidate = { id: number; type: "Camp" | "Fuel" | "Attraction" | "Hike"; name: string; area: string; distance: number; detail: string; tag: string; score: number };
+type Campsite = {
+  id: string; name: string; area: string; type: string; latitude: number; longitude: number;
+  cost: number | null; reservation: string; rating: number | null; favorite: boolean;
+  notes: string; source: string; source_url: string; last_verified_at: string | null;
+};
+type Trip = { id: string; name: string; start_location: string | null; destinations: string[]; mpg: number | null; tank_gallons: number | null; fuel_reserve_percent: number; created_at: string };
+type Stop = { id?: string; name: string; latitude: number; longitude: number; campsite_id?: string; stop_order: number; notes?: string };
 
-const seedStops: Stop[] = [
-  { id: 1, type: "start", title: "Kansas City, MO", subtitle: "Trip start", miles: 0, meta: "Day 1", day: 1 },
-  { id: 2, type: "fuel", title: "Loveland, CO", subtitle: "Fuel + supplies", miles: 540, meta: "Fuel stop", day: 1 },
-  { id: 3, type: "camp", title: "Medicine Lodge", subtitle: "Dispersed / primitive camping", miles: 278, meta: "6,236 ft", day: 1, elevation: 6236 },
-  { id: 4, type: "destination", title: "Yellowstone", subtitle: "Destination", miles: 166, meta: "Explore", day: 2 },
-  { id: 5, type: "camp", title: "Jardine Dispersed", subtitle: "North of Yellowstone", miles: 73, meta: "6,143 ft", day: 2, elevation: 6143 },
-  { id: 6, type: "destination", title: "Grand Teton", subtitle: "Destination", miles: 96, meta: "Explore", day: 3 },
-  { id: 7, type: "camp", title: "Shadow Mountain", subtitle: "Dispersed camping", miles: 31, meta: "7,099 ft", day: 3, elevation: 7099 },
+const sampleCampsites: Campsite[] = [
+  { id:"demo-1", name:"Shadow Mountain", area:"Grand Teton, WY", type:"Dispersed", latitude:43.697, longitude:-110.631, cost:0, reservation:"Dispersed / no reservation", rating:5, favorite:true, notes:"Great backup near Grand Teton.", source:"iOverlander", source_url:"", last_verified_at:"2026-08-01" },
+  { id:"demo-2", name:"Madison Campground", area:"Yellowstone, WY", type:"Developed", latitude:44.645, longitude:-110.862, cost:35, reservation:"Reservation", rating:5, favorite:true, notes:"Primary Yellowstone option.", source:"Recreation.gov", source_url:"", last_verified_at:"2026-08-01" },
+  { id:"demo-3", name:"Baker's Hole", area:"West Yellowstone, MT", type:"Forest campground", latitude:44.684, longitude:-111.122, cost:25, reservation:"First come / check current rules", rating:4, favorite:false, notes:"Good Yellowstone backup.", source:"Personal research", source_url:"", last_verified_at:"2026-08-01" },
+  { id:"demo-4", name:"Gros Ventre Campground", area:"Grand Teton, WY", type:"Developed", latitude:43.660, longitude:-110.649, cost:25, reservation:"Varies", rating:4, favorite:false, notes:"Useful backup for the Jackson side.", source:"Recreation.gov", source_url:"", last_verified_at:"2026-08-01" },
 ];
-
-const candidates: Candidate[] = [
-  { id: 1, type: "Camp", name: "Shadow Mountain Dispersed", area: "Grand Teton", distance: 11, detail: "Primitive camping candidate · 7,099 ft", tag: "Camping style match", score: 94 },
-  { id: 2, type: "Camp", name: "Jardine Area Dispersed", area: "Yellowstone North", distance: 18, detail: "Dispersed candidate · 6,143 ft", tag: "Near destination", score: 91 },
-  { id: 3, type: "Fuel", name: "Cody Fuel Stop", area: "Cody, WY", distance: 43, detail: "Useful resupply point before remote travel", tag: "Fuel safety", score: 96 },
-  { id: 4, type: "Fuel", name: "West Yellowstone Fuel", area: "West Yellowstone, MT", distance: 7, detail: "Convenient fill before park travel", tag: "Fuel safety", score: 90 },
-  { id: 5, type: "Attraction", name: "LeHardy Rapids", area: "Yellowstone", distance: 5, detail: "Quick scenic stop · 15–30 minutes", tag: "Low time cost", score: 88 },
-  { id: 6, type: "Attraction", name: "Artist Point", area: "Yellowstone", distance: 22, detail: "Major canyon overlook and scenic stop", tag: "Must see", score: 95 },
-  { id: 7, type: "Hike", name: "Clear Lake Artist Point Loop", area: "Yellowstone", distance: 24, detail: "3.9 mi · moderate · ~1h 33m", tag: "Fits day plan", score: 92 },
-  { id: 8, type: "Hike", name: "Jenny Lake Trail", area: "Grand Teton", distance: 9, detail: "Scenic lake route · adjustable distance", tag: "High interest", score: 89 },
-];
-
-const initialPacking = ["Recovery boards", "Air compressor", "First aid kit", "Headlamps", "Water storage", "Camp stove", "Cooler", "Tool kit"];
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState("Overview");
-  const [showPlanner, setShowPlanner] = useState(false);
-  const [fuelReserve, setFuelReserve] = useState(15);
-  const [tripName, setTripName] = useState("Wild West Adventure");
-  const [start, setStart] = useState("Kansas City, MO");
-  const [destinations, setDestinations] = useState("Yellowstone, Grand Teton, Black Hills");
-  const [mpg, setMpg] = useState(15);
-  const [tank, setTank] = useState(36);
-  const [gasPrice, setGasPrice] = useState(3.57);
-  const [foodBudget, setFoodBudget] = useState(350);
-  const [parkBudget, setParkBudget] = useState(80);
-  const [campBudget, setCampBudget] = useState(120);
-  const [funBudget, setFunBudget] = useState(150);
-  const [bufferBudget, setBufferBudget] = useState(200);
-  const [dailyHours, setDailyHours] = useState(6);
-  const [campingStyle, setCampingStyle] = useState("Dispersed / primitive");
-  const [stops, setStops] = useState(seedStops);
-  const [packing, setPacking] = useState(initialPacking.map((name, i) => ({ id: i + 1, name, done: false })));
-  const [newItem, setNewItem] = useState("");
-  const [researchType, setResearchType] = useState("All");
-  const [researchArea, setResearchArea] = useState("All");
-  const [savedResearch, setSavedResearch] = useState<number[]>([1, 3, 6]);
-  const [routeAlert, setRouteAlert] = useState(true);
-  const [saveMessage, setSaveMessage] = useState("");
-  const [userEmail, setUserEmail] = useState("");
-  const [authLoading, setAuthLoading] = useState(true);
-  const [authBusy, setAuthBusy] = useState(false);
-  const [showAuth, setShowAuth] = useState(false);
-  const [showTrips, setShowTrips] = useState(false);
-  const [savedTripId, setSavedTripId] = useState<string | null>(null);
-  const [savedTrips, setSavedTrips] = useState<Array<{ id: string; name: string; created_at: string; start_location: string | null }>>([]);
-  const [days, setDays] = useState<DayPlan[]>([
-    { day: 1, label: "Travel Day", destination: "Colorado / Wyoming", maxHours: 6, overnight: "Medicine Lodge area" },
-    { day: 2, label: "Yellowstone", destination: "Yellowstone National Park", maxHours: 4, overnight: "Jardine area" },
-    { day: 3, label: "Grand Teton", destination: "Grand Teton National Park", maxHours: 4, overnight: "Shadow Mountain" },
-  ]);
+  const [tab,setTab]=useState<"Dashboard"|"Trips"|"Campsites"|"Fuel"|"Budget"|"Pack List">("Dashboard");
+  const [view,setView]=useState<"list"|"map">("list");
+  const [userEmail,setUserEmail]=useState(""); const [authOpen,setAuthOpen]=useState(false); const [authBusy,setAuthBusy]=useState(false); const [authEmail,setAuthEmail]=useState(""); const [authPassword,setAuthPassword]=useState("");
+  const [message,setMessage]=useState("");
+  const [campsites,setCampsites]=useState<Campsite[]>([]); const [loadingCamps,setLoadingCamps]=useState(false);
+  const [showCampForm,setShowCampForm]=useState(false); const [editing,setEditing]=useState<Campsite|null>(null); const [search,setSearch]=useState(""); const [areaFilter,setAreaFilter]=useState("All");
+  const [trips,setTrips]=useState<Trip[]>([]); const [tripName,setTripName]=useState("Yellowstone Adventure"); const [start,setStart]=useState("Kansas City, MO"); const [selectedTrip,setSelectedTrip]=useState<Trip|null>(null);
+  const [mpg,setMpg]=useState(15); const [tank,setTank]=useState(36); const [reserve,setReserve]=useState(15); const [stops,setStops]=useState<Stop[]>([]); const [routeLoading,setRouteLoading]=useState(false); const [route,setRoute]=useState<any>(null); const [fuelStations,setFuelStations]=useState<any[]>([]);
+  const [budget,setBudget]=useState({camp:300,food:500,fees:100,other:200});
+  const [pack,setPack]=useState(["Recovery boards","Air compressor","First aid kit","Headlamps","Water storage","Camp stove","Cooler","Tool kit"]);
+  const [newPack,setNewPack]=useState("");
 
-  const totalMiles = stops.reduce((sum, s) => sum + s.miles, 0);
-  const fullRange = Math.round(tank * mpg);
-  const usableRange = Math.round(fullRange * (1 - fuelReserve / 100));
-  const gallons = totalMiles / Math.max(mpg, 1);
-  const fuelCost = gallons * gasPrice;
-  const tripBudget = fuelCost + foodBudget + parkBudget + campBudget + funBudget + bufferBudget;
-  const daysCount = Math.max(days.length, 1);
-  const filteredCandidates = candidates.filter((c) => (researchType === "All" || c.type === researchType) && (researchArea === "All" || c.area.includes(researchArea)));
-  const saved = candidates.filter((c) => savedResearch.includes(c.id));
+  useEffect(()=>{ const sb=createClient(); let mounted=true; sb.auth.getUser().then(({data})=>{if(mounted)setUserEmail(data.user?.email||"")}); const {data}=sb.auth.onAuthStateChange((_e,s)=>mounted&&setUserEmail(s?.user?.email||"")); return()=>{mounted=false;data.subscription.unsubscribe()}; },[]);
+  useEffect(()=>{ if(userEmail) { loadCampsites(); loadTrips(); } else { setCampsites([]); setTrips([]); } },[userEmail]);
 
-  useEffect(() => {
-    const supabase = createClient();
-    let mounted = true;
-    supabase.auth.getUser().then(({ data }) => {
-      if (!mounted) return;
-      setUserEmail(data.user?.email ?? "");
-      setAuthLoading(false);
-    });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!mounted) return;
-      setUserEmail(session?.user?.email ?? "");
-      setAuthLoading(false);
-    });
-    return () => { mounted = false; listener.subscription.unsubscribe(); };
-  }, []);
+  async function loadCampsites(){setLoadingCamps(true); const sb=createClient(); const {data,error}=await sb.from("campsites").select("*").order("name"); if(error){setMessage(error.message)} else setCampsites(data||[]); setLoadingCamps(false)}
+  async function loadTrips(){const sb=createClient(); const {data}=await sb.from("trips").select("id,name,start_location,destinations,mpg,tank_gallons,fuel_reserve_percent,created_at").order("created_at",{ascending:false}); setTrips(data||[])}
+  async function auth(mode:"signin"|"signup"){setAuthBusy(true);setMessage("");const sb=createClient();const fn=mode==="signin"?sb.auth.signInWithPassword({email:authEmail,password:authPassword}):sb.auth.signUp({email:authEmail,password:authPassword});const {error}=await fn;if(error)setMessage(error.message);else {setMessage(mode==="signup"?"Account created. Check your email if confirmation is required.":"Signed in.");setAuthOpen(false)}setAuthBusy(false)}
+  async function signOut(){await createClient().auth.signOut();setMessage("Signed out.")}
 
-  const groupedDays = useMemo(() => {
-    const map = new Map<number, Stop[]>();
-    stops.forEach((s) => map.set(s.day, [...(map.get(s.day) || []), s]));
-    return [...map.entries()].sort((a, b) => a[0] - b[0]);
-  }, [stops]);
+  const areas=useMemo(()=>["All",...Array.from(new Set(campsites.map(c=>c.area))).sort()],[campsites]);
+  const filtered=campsites.filter(c=>`${c.name} ${c.area} ${c.type}`.toLowerCase().includes(search.toLowerCase())&&(areaFilter==="All"||c.area===areaFilter));
+  const fullRange=Math.round(mpg*tank); const safeRange=Math.round(fullRange*(1-reserve/100));
+  const routeStops=stops.length?stops:[];
 
-  async function saveTripToSupabase() {
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
-      setSaveMessage("Supabase is not connected yet. Add the two environment variables in Vercel.");
-      return;
-    }
-    const supabase = createClient();
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) {
-      setShowAuth(true);
-      setSaveMessage("Sign in or create an account to save trips.");
-      return;
-    }
-    setSaveMessage("Saving trip…");
-    const payload = {
-      user_id: auth.user.id, name: tripName, start_location: start,
-      destinations: destinations.split(",").map((x) => x.trim()).filter(Boolean),
-      mpg, tank_gallons: tank, fuel_reserve_percent: fuelReserve,
-      daily_driving_hours: dailyHours, camping_style: campingStyle, planning_gas_price: gasPrice
-    };
-    let tripId = savedTripId;
-    let error: any = null;
-    if (tripId) {
-      const result = await supabase.from("trips").update(payload).eq("id", tripId).select().single();
-      error = result.error;
-    } else {
-      const result = await supabase.from("trips").insert(payload).select().single();
-      error = result.error;
-      if (result.data) tripId = result.data.id;
-    }
-    if (error || !tripId) { setSaveMessage(error?.message || "Unable to save trip."); return; }
-    await supabase.from("trip_days").delete().eq("trip_id", tripId);
-    const { error: dayError } = await supabase.from("trip_days").insert(days.map((d) => ({ trip_id: tripId, day_number: d.day, label: d.label, destination: d.destination, max_hours: d.maxHours, overnight: d.overnight })));
-    setSavedTripId(tripId);
-    setSaveMessage(dayError ? `Trip saved, but days failed: ${dayError.message}` : "Trip saved to Supabase.");
-  }
+  function openNew(){setEditing(null);setShowCampForm(true)}
+  function openEdit(c:Campsite){setEditing(c);setShowCampForm(true)}
+  async function saveCampsite(c:Campsite){if(!userEmail){setAuthOpen(true);return}const sb=createClient(); const payload={name:c.name,area:c.area,type:c.type,latitude:c.latitude,longitude:c.longitude,cost:c.cost,reservation:c.reservation,rating:c.rating,favorite:c.favorite,notes:c.notes,source:c.source,source_url:c.source_url,last_verified_at:c.last_verified_at||null}; const q=editing?sb.from("campsites").update(payload).eq("id",editing.id):sb.from("campsites").insert({...payload,user_id:(await sb.auth.getUser()).data.user?.id}).select().single(); const {error}=await q;if(error){setMessage(error.message);return}setShowCampForm(false);setMessage("Campsite saved.");loadCampsites()}
+  async function deleteCampsite(c:Campsite){if(!confirm(`Delete ${c.name}?`))return;const {error}=await createClient().from("campsites").delete().eq("id",c.id);if(error)setMessage(error.message);else loadCampsites()}
+  async function createTrip(){if(!userEmail){setAuthOpen(true);return}const sb=createClient();const {data:user}=await sb.auth.getUser();const {data,error}=await sb.from("trips").insert({user_id:user.user?.id,name:tripName,start_location:start,destinations:[],mpg,tank_gallons:tank,fuel_reserve_percent:reserve}).select().single();if(error){setMessage(error.message);return}setTrips([data,...trips]);setSelectedTrip(data);setTab("Trips");setMessage("Trip created.")}
+  async function saveStops(){if(!selectedTrip)return;const sb=createClient();await sb.from("trip_stops").delete().eq("trip_id",selectedTrip.id);const {error}=await sb.from("trip_stops").insert(stops.map((s,i)=>({trip_id:selectedTrip.id,campsite_id:s.campsite_id||null,name:s.name,latitude:s.latitude,longitude:s.longitude,stop_order:i,notes:s.notes||""})));setMessage(error?error.message:"Trip stops saved.")}
+  function addStop(c:Campsite){setStops(prev=>[...prev,{name:c.name,latitude:c.latitude,longitude:c.longitude,campsite_id:c.id,stop_order:prev.length}]);setTab("Trips")}
+  async function calculateRoute(){if(stops.length<2){setMessage("Add at least two stops to calculate a route.");return}const token=process.env.NEXT_PUBLIC_MAPBOX_TOKEN;if(!token){setMessage("Add NEXT_PUBLIC_MAPBOX_TOKEN in Vercel to enable maps and routing.");return}setRouteLoading(true);setMessage("");const coords=stops.map(s=>`${s.longitude},${s.latitude}`).join(";");const res=await fetch(`https://api.mapbox.com/directions/v5/mapbox/driving/${coords}?geometries=geojson&overview=full&steps=false&access_token=${token}`);const data=await res.json();if(!res.ok||data.code!=="Ok"){setMessage(data.message||"Mapbox routing failed.");setRouteLoading(false);return}setRoute(data.routes?.[0]||null);const geometry=data.routes?.[0]?.geometry; if(geometry){const encoded=encodePolyline6(geometry.coordinates); const searchUrl=`https://api.mapbox.com/search/searchbox/v1/category/gas_station?route=${encodeURIComponent(encoded)}&route_geometry=polyline6&sar_type=isochrone&time_deviation=15&limit=10&access_token=${token}`; try{const fr=await fetch(searchUrl);const fd=await fr.json();setFuelStations(fd.features||[])}catch{setFuelStations([])}}setRouteLoading(false);await saveStops()}
 
-  async function loadTrips() {
-    const supabase = createClient();
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) { setShowAuth(true); return; }
-    const { data, error } = await supabase.from("trips").select("id,name,created_at,start_location").order("created_at", { ascending: false });
-    if (error) { setSaveMessage(error.message); return; }
-    setSavedTrips(data ?? []);
-    setShowTrips(true);
-  }
-
-  async function loadTrip(id: string) {
-    const supabase = createClient();
-    const { data: trip, error } = await supabase.from("trips").select("*").eq("id", id).single();
-    if (error || !trip) { setSaveMessage(error?.message || "Unable to load trip."); return; }
-    const { data: dbDays } = await supabase.from("trip_days").select("day_number,label,destination,max_hours,overnight").eq("trip_id", id).order("day_number");
-    setTripName(trip.name || "Untitled Trip");
-    setStart(trip.start_location || "");
-    setDestinations((trip.destinations || []).join(", "));
-    setMpg(Number(trip.mpg || 15));
-    setTank(Number(trip.tank_gallons || 36));
-    setFuelReserve(Number(trip.fuel_reserve_percent ?? 15));
-    setDailyHours(Number(trip.daily_driving_hours || 6));
-    setCampingStyle(trip.camping_style || "Dispersed / primitive");
-    setGasPrice(Number(trip.planning_gas_price || 3.57));
-    if (dbDays?.length) setDays(dbDays.map((d) => ({ day: d.day_number, label: d.label || "Explore", destination: d.destination || "", maxHours: Number(d.max_hours || 6), overnight: d.overnight || "TBD" })));
-    setSavedTripId(id);
-    setShowTrips(false);
-    setActiveTab("Overview");
-    setSaveMessage("Trip loaded from Supabase.");
-  }
-
-  async function signOut() {
-    const supabase = createClient();
-    await supabase.auth.signOut();
-    setSavedTripId(null);
-    setSavedTrips([]);
-    setSaveMessage("Signed out.");
-  }
-
-  function createTrip() {
-    const names = destinations.split(",").map((x) => x.trim()).filter(Boolean);
-    const generated: Stop[] = [{ id: 1, type: "start", title: start || "Starting point", subtitle: "Trip start", miles: 0, meta: "Day 1", day: 1 }];
-    const generatedDays: DayPlan[] = [];
-    names.forEach((name, i) => {
-      const day = i + 1;
-      generated.push({ id: i + 2, type: "destination", title: name, subtitle: "Destination", miles: i === 0 ? 0 : 250, meta: "Explore", day });
-      generatedDays.push({ day, label: i === 0 ? "Travel Day" : "Explore", destination: name, maxHours: Math.min(dailyHours, 8), overnight: `${name} area` });
-      if (i < names.length - 1) generated.push({ id: 100 + i, type: "camp", title: `${name} area camp`, subtitle: campingStyle, miles: 25, meta: `${6000 + i * 500} ft`, day, elevation: 6000 + i * 500 });
-    });
-    setStops(generated);
-    setDays(generatedDays.length ? generatedDays : [{ day: 1, label: "Trip", destination: "Add a destination", maxHours: dailyHours, overnight: "TBD" }]);
-    setActiveTab("Route");
-    setShowPlanner(false);
-  }
-
-  function addPackingItem() {
-    if (!newItem.trim()) return;
-    setPacking((items) => [...items, { id: Date.now(), name: newItem.trim(), done: false }]);
-    setNewItem("");
-  }
-  function addDay() {
-    const day = days.length + 1;
-    setDays((items) => [...items, { day, label: "Explore", destination: "New destination", maxHours: dailyHours, overnight: "TBD" }]);
-  }
-  function updateDay(day: number, key: keyof DayPlan, value: string | number) {
-    setDays((items) => items.map((d) => d.day === day ? { ...d, [key]: value } : d));
-  }
-  function toggleSaved(id: number) {
-    setSavedResearch((items) => items.includes(id) ? items.filter((x) => x !== id) : [...items, id]);
-  }
-  function addCandidate(c: Candidate) {
-    const day = Math.min(Math.max(days.length, 1), 3);
-    const typeMap: Record<Candidate["type"], StopType> = { Camp: "camp", Fuel: "fuel", Attraction: "attraction", Hike: "attraction" };
-    setStops((items) => [...items, { id: Date.now(), type: typeMap[c.type], title: c.name, subtitle: c.detail, miles: c.distance, meta: c.tag, day }]);
-    setActiveTab("Route");
-  }
-
-  return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">↟</span><span>OVERLAND<br/><b>PLANNER</b></span></div>
-        <div className="trip-card"><span className="eyebrow">ACTIVE TRIP</span><h3>{tripName}</h3><p>{daysCount} days · {Math.round(totalMiles).toLocaleString()} mi</p><div className="trip-progress"><span /></div><small>Planning mode</small></div>
-        <nav>{["Overview", "Route", "Research", "Campsites", "Fuel", "Attractions", "Budget", "Pack List"].map((item) => <button key={item} className={activeTab === item ? "nav-item active" : "nav-item"} onClick={() => setActiveTab(item)}><span className="nav-icon">{iconFor(item)}</span>{item}</button>)}</nav>
-        <div className="sidebar-bottom"><span className="status-dot" /> Research workspace</div>
-      </aside>
-
-      <section className="main-content">
-        <header className="topbar"><div><span className="breadcrumb">TRIPS / {tripName.toUpperCase()}</span><h1>{activeTab}</h1></div><div className="header-actions"><button className="ghost-button" onClick={() => setActiveTab("Overview")}>Dashboard</button>{userEmail ? <><button className="ghost-button" onClick={loadTrips}>My Trips</button><button className="ghost-button" onClick={signOut} title={userEmail}>{userEmail.split("@")[0]} · Sign out</button></> : <button className="ghost-button" onClick={() => setShowAuth(true)}>{authLoading ? "Checking…" : "Sign in"}</button>}<button className="primary-button" onClick={saveTripToSupabase}>Save Trip</button><button className="primary-button" onClick={() => setShowPlanner(true)}>＋ Build Trip</button></div></header>
-        <div className="content">{saveMessage && <div className="save-banner">{saveMessage}</div>}
-          {activeTab === "Overview" && <Overview totalMiles={totalMiles} fuelCost={fuelCost} usableRange={usableRange} fullRange={fullRange} tripBudget={tripBudget} fuelReserve={fuelReserve} setFuelReserve={setFuelReserve} stops={stops} setActiveTab={setActiveTab} days={days} routeAlert={routeAlert} setRouteAlert={setRouteAlert} />}
-          {activeTab === "Route" && <RouteView stops={stops} totalMiles={totalMiles} days={days} addDay={addDay} updateDay={updateDay} usableRange={usableRange} routeAlert={routeAlert} setRouteAlert={setRouteAlert} groupedDays={groupedDays} />}
-          {activeTab === "Research" && <ResearchView candidates={filteredCandidates} researchType={researchType} setResearchType={setResearchType} researchArea={researchArea} setResearchArea={setResearchArea} saved={saved} savedResearch={savedResearch} toggleSaved={toggleSaved} addCandidate={addCandidate} />}
-          {activeTab === "Fuel" && <FuelView stops={stops} usableRange={usableRange} fullRange={fullRange} fuelCost={fuelCost} gasPrice={gasPrice} setGasPrice={setGasPrice} mpg={mpg} tank={tank} />}
-          {activeTab === "Campsites" && <SimpleList title="Campsites" eyebrow="OVERNIGHTS" items={stops.filter((s) => s.type === "camp").map((s) => `${s.title} · ${s.meta} · ${s.subtitle}`)} empty="No campsites have been added yet." />}
-          {activeTab === "Attractions" && <SimpleList title="Attractions & hikes" eyebrow="DISCOVER" items={candidates.filter((c) => c.type === "Attraction" || c.type === "Hike").map((d) => `${d.name} · ${d.type} · ${d.tag}`)} empty="No discoveries yet." />}
-          {activeTab === "Budget" && <BudgetView fuelCost={fuelCost} foodBudget={foodBudget} setFoodBudget={setFoodBudget} parkBudget={parkBudget} setParkBudget={setParkBudget} campBudget={campBudget} setCampBudget={setCampBudget} funBudget={funBudget} setFunBudget={setFunBudget} bufferBudget={bufferBudget} setBufferBudget={setBufferBudget} tripBudget={tripBudget} />}
-          {activeTab === "Pack List" && <PackView packing={packing} setPacking={setPacking} newItem={newItem} setNewItem={setNewItem} addPackingItem={addPackingItem} />}
-        </div>
-      </section>
-
-      {showAuth && <AuthModal onClose={() => setShowAuth(false)} onSuccess={() => setShowAuth(false)} setSaveMessage={setSaveMessage} />}
-      {showTrips && <div className="modal-backdrop" onClick={() => setShowTrips(false)}><div className="modal trip-list-modal" onClick={(e) => e.stopPropagation()}><button className="close" onClick={() => setShowTrips(false)}>×</button><span className="eyebrow">YOUR TRIPS</span><h2>Saved adventures</h2><p>Trips saved to your Supabase account appear here.</p>{savedTrips.length ? savedTrips.map((trip) => <button className="trip-list-row" key={trip.id} onClick={() => loadTrip(trip.id)}><span>↟</span><div><strong>{trip.name}</strong><small>{trip.start_location || "Starting point not set"} · {new Date(trip.created_at).toLocaleDateString()}</small></div><b>Load →</b></button>) : <div className="empty">No saved trips yet. Build a trip and hit Save Trip.</div>}</div></div>}
-      {showPlanner && <div className="modal-backdrop" onClick={() => setShowPlanner(false)}><div className="modal wide-modal" onClick={(e) => e.stopPropagation()}><button className="close" onClick={() => setShowPlanner(false)}>×</button><span className="eyebrow">NEW TRIP</span><h2>Start with the route.</h2><p>These inputs become the planning rules the research engine will use for campsites, fuel, attractions and hikes.</p><div className="form-grid"><label>Trip name<input value={tripName} onChange={(e) => setTripName(e.target.value)} placeholder="e.g. Colorado Backcountry 2027" /></label><label>Starting point<input value={start} onChange={(e) => setStart(e.target.value)} placeholder="Kansas City, MO" /></label><label className="wide">Destinations<input value={destinations} onChange={(e) => setDestinations(e.target.value)} placeholder="Yellowstone, Grand Teton, Black Hills" /></label><label>Vehicle MPG<input type="number" min="1" value={mpg} onChange={(e) => setMpg(Number(e.target.value))} /></label><label>Tank size (gal)<input type="number" min="1" value={tank} onChange={(e) => setTank(Number(e.target.value))} /></label><label>Daily driving limit<select value={dailyHours} onChange={(e) => setDailyHours(Number(e.target.value))}>{[3,4,5,6,7,8,9,10].map((h) => <option key={h} value={h}>{h} hours</option>)}</select></label><label>Camping style<select value={campingStyle} onChange={(e) => setCampingStyle(e.target.value)}><option>Dispersed / primitive</option><option>Established campground</option><option>Either</option></select></label></div><div className="planner-preview"><div><b>Safe range</b><span>{usableRange} mi</span></div><div><b>Fuel estimate</b><span>${Math.round(fuelCost)}</span></div><div><b>Research candidates</b><span>{candidates.length}</span></div></div><button className="primary-button full" onClick={createTrip}>Build this trip →</button></div></div>}
-    </main>
-  );
+  return <div className="app-shell">
+    <header className="topbar"><div className="brand"><span className="brand-mark">↗</span><div><strong>OVERLAND PLANNER</strong><small>Trip logistics, simplified.</small></div></div><div className="top-actions">{userEmail?<><span className="user-pill">{userEmail}</span><button onClick={signOut}>Sign out</button></>:<button className="primary" onClick={()=>setAuthOpen(true)}>Sign in</button>}</div></header>
+    <div className="body"><aside className="sidebar">{["Dashboard","Trips","Campsites","Fuel","Budget","Pack List"].map(x=><button key={x} className={tab===x?"nav active":"nav"} onClick={()=>setTab(x as any)}><span>{x==="Campsites"?"⌂":x==="Fuel"?"⛽":x==="Budget"?"$":x==="Pack List"?"✓":x==="Trips"?"⌁":"▦"}</span>{x}</button>)}<div className="side-note"><b>Our lane</b><span>Your campsites. Your route. Your fuel plan.</span></div></aside>
+    <main className="main">
+      {tab==="Dashboard"&&<Dashboard trips={trips} campsites={campsites} safeRange={safeRange} createTrip={()=>setTab("Trips")} />}
+      {tab==="Trips"&&<TripsView trips={trips} tripName={tripName} setTripName={setTripName} start={start} setStart={setStart} createTrip={createTrip} selectedTrip={selectedTrip} setSelectedTrip={setSelectedTrip} campsites={campsites} addStop={addStop} stops={stops} setStops={setStops} route={route} routeLoading={routeLoading} calculateRoute={calculateRoute} fuelStations={fuelStations} saveStops={saveStops}/>} 
+      {tab==="Campsites"&&<section className="content"><div className="page-head"><div><span className="eyebrow">CAMPSITE LIBRARY</span><h1>Your campsites.</h1><p>Save the places you find elsewhere. Use them as primary stops or backups on future trips.</p></div><button className="primary" onClick={openNew}>＋ Add campsite</button></div><div className="toolbar"><input placeholder="Search campsites..." value={search} onChange={e=>setSearch(e.target.value)}/><select value={areaFilter} onChange={e=>setAreaFilter(e.target.value)}>{areas.map(a=><option key={a}>{a}</option>)}</select><div className="seg"><button className={view==="list"?"selected":""} onClick={()=>setView("list")}>List</button><button className={view==="map"?"selected":""} onClick={()=>setView("map")}>Map</button></div></div>{!userEmail?<EmptyState title="Sign in to build your campsite library." action={()=>setAuthOpen(true)}/>:loadingCamps?<div className="loading">Loading campsites…</div>:view==="map"?<div className="map-card"><Map campsites={filtered} route={null} onSelect={openEdit}/></div>:<div className="table-card"><div className="table-head"><span>Campsite</span><span>Area</span><span>Type</span><span>Cost</span><span>Rating</span><span></span></div>{filtered.length?filtered.map(c=><div className="table-row" key={c.id}><div><strong>{c.favorite?"★ ":""}{c.name}</strong><small>{c.notes||"No notes yet"}</small></div><span>{c.area}</span><span>{c.type}</span><span>{c.cost==null?"—":c.cost===0?"Free":`$${c.cost}`}</span><span>{c.rating?"★".repeat(c.rating):"—"}</span><div className="row-actions"><button onClick={()=>addStop(c)}>＋ Trip</button><button onClick={()=>openEdit(c)}>Edit</button><button onClick={()=>deleteCampsite(c)}>Delete</button></div></div>):<div className="empty">No campsites match your filters.</div>}</div>}</section>}
+      {tab==="Fuel"&&<FuelView mpg={mpg} setMpg={setMpg} tank={tank} setTank={setTank} reserve={reserve} setReserve={setReserve} safeRange={safeRange} fullRange={fullRange} route={route} stations={fuelStations}/>} 
+      {tab==="Budget"&&<BudgetView budget={budget} setBudget={setBudget}/>} 
+      {tab==="Pack List"&&<PackView pack={pack} setPack={setPack} newPack={newPack} setNewPack={setNewPack}/>} 
+    </main></div>
+    {showCampForm&&<CampForm initial={editing} onClose={()=>setShowCampForm(false)} onSave={saveCampsite}/>} 
+    {authOpen&&<AuthModal email={authEmail} password={authPassword} setEmail={setAuthEmail} setPassword={setAuthPassword} busy={authBusy} onClose={()=>setAuthOpen(false)} onSignIn={()=>auth("signin")} onSignUp={()=>auth("signup")}/>} 
+    {message&&<button className="toast" onClick={()=>setMessage("")}>{message}</button>}
+  </div>
 }
 
-function AuthModal({ onClose, onSuccess, setSaveMessage }: { onClose: () => void; onSuccess: () => void; setSaveMessage: (message: string) => void }) {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+function Dashboard({trips,campsites,safeRange,createTrip}:any){return <section className="content"><div className="hero"><span className="eyebrow">OVERLAND PLANNER 0.6</span><h1>Plan the trip.<br/><i>Not everything else.</i></h1><p>A focused workspace for the parts of overlanding that are hardest to keep straight: campsites, routes, fuel and budget.</p><button className="primary" onClick={createTrip}>Build a trip</button></div><div className="stat-grid"><Stat n={trips.length} label="Saved trips"/><Stat n={campsites.length} label="Saved campsites"/><Stat n={`${safeRange} mi`} label="Current safe range"/></div><div className="three"><Card title="Campsite library" text="Keep your own list of primary and backup campsites, with coordinates ready for routing."/><Card title="Fuel planning" text="Route first. Then find fuel along the road and layer pricing on top."/><Card title="Simple budget" text="Keep the practical costs that matter on a long overland trip in one place."/></div></section>}
+function TripsView({trips,tripName,setTripName,start,setStart,createTrip,selectedTrip,setSelectedTrip,campsites,addStop,stops,setStops,route,routeLoading,calculateRoute,fuelStations,saveStops}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">TRIPS</span><h1>Route your stops.</h1><p>Pick campsites from your library. Then let routing and fuel planning handle the logistics.</p></div></div><div className="trip-builder"><div className="form-card"><h3>New trip</h3><label>Trip name<input value={tripName} onChange={e=>setTripName(e.target.value)}/></label><label>Starting point<input value={start} onChange={e=>setStart(e.target.value)}/></label><button className="primary" onClick={createTrip}>Create trip</button></div><div className="form-card"><h3>Saved trips</h3>{trips.length?trips.map((t:Trip)=><button className={selectedTrip?.id===t.id?"trip-item selected":"trip-item"} key={t.id} onClick={()=>setSelectedTrip(t)}><strong>{t.name}</strong><small>{t.start_location||"No start"}</small></button>):<div className="empty">No saved trips yet.</div>}</div></div>{selectedTrip&&<div className="route-workspace"><div className="route-sidebar"><div className="section-title"><div><span className="eyebrow">{selectedTrip.name}</span><h2>Stops</h2></div><button onClick={saveStops}>Save</button></div>{stops.map((s:Stop,i:number)=><div className="stop-row" key={`${s.name}-${i}`}><span>{i+1}</span><div><strong>{s.name}</strong><small>{s.latitude.toFixed(4)}, {s.longitude.toFixed(4)}</small></div><button onClick={()=>setStops((p:Stop[])=>p.filter((_,idx)=>idx!==i))}>×</button></div>)}<div className="library-mini"><b>Add from library</b>{campsites.slice(0,8).map((c:Campsite)=><button key={c.id} onClick={()=>addStop(c)}>＋ {c.name}</button>)}</div><button className="primary full" disabled={routeLoading} onClick={calculateRoute}>{routeLoading?"Calculating…":"Calculate route & fuel"}</button></div><div className="route-map"><Map campsites={campsites} route={route} stops={stops} fuelStations={fuelStations}/></div></div>}</section>}
+function FuelView({mpg,setMpg,tank,setTank,reserve,setReserve,safeRange,fullRange,route,stations}:any){const miles=route?Math.round(route.distance/1609.344):0;const hours=route?Math.round(route.duration/3600*10)/10:0;return <section className="content"><div className="page-head"><div><span className="eyebrow">FUEL</span><h1>Know your range.</h1><p>Vehicle assumptions stay simple. The route tells us where fuel needs to happen.</p></div></div><div className="fuel-grid"><div className="form-card"><h3>Vehicle</h3><label>MPG<input type="number" value={mpg} onChange={e=>setMpg(Number(e.target.value))}/></label><label>Tank gallons<input type="number" value={tank} onChange={e=>setTank(Number(e.target.value))}/></label><label>Reserve %<input type="number" value={reserve} onChange={e=>setReserve(Number(e.target.value))}/></label><div className="big-number">{safeRange}<small>safe miles</small></div><span className="muted">{fullRange} miles at a full tank</span></div><div className="form-card"><h3>Current route</h3>{route?<><div className="metric-line"><span>Distance</span><b>{miles.toLocaleString()} mi</b></div><div className="metric-line"><span>Drive time</span><b>{hours} hr</b></div><h4>Gas stations found along route</h4>{stations?.length?stations.slice(0,8).map((s:any)=><div className="station" key={s.properties?.mapbox_id||s.id}><div><strong>{s.properties?.name||s.text||"Gas station"}</strong><small>{s.properties?.full_address||s.properties?.place_formatted||""}</small></div><span>Price pending</span></div>):<div className="empty">No stations returned yet.</div>}<p className="muted">CollectAPI pricing will plug into these station records once the account endpoint is configured.</p></>:<div className="empty">Calculate a route from the Trips page first.</div>}</div></div></section>}
+function BudgetView({budget,setBudget}:any){const total=Object.values(budget).reduce((a:any,b:any)=>a+Number(b),0);return <section className="content"><div className="page-head"><div><span className="eyebrow">BUDGET</span><h1>Keep the math simple.</h1><p>Fuel will become route-driven. Everything else stays editable.</p></div></div><div className="budget-card">{Object.entries(budget).map(([k,v]:any)=><label key={k}>{k.replace("fees","park fees").replace("camp","camping").replace("other","other").replace("food","food")}<input type="number" value={v} onChange={e=>setBudget({...budget,[k]:Number(e.target.value)})}/></label>)}<div className="total"><span>Current non-fuel budget</span><strong>${total.toLocaleString()}</strong></div></div></section>}
+function PackView({pack,setPack,newPack,setNewPack}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">PACK LIST</span><h1>Reuse your loadout.</h1><p>A simple checklist. Nothing more.</p></div></div><div className="pack-card"><div className="add-row"><input placeholder="Add item" value={newPack} onChange={e=>setNewPack(e.target.value)}/><button className="primary" onClick={()=>{if(newPack.trim()){setPack([...pack,newPack.trim()]);setNewPack("")}}}>Add</button></div>{pack.map((x:string,i:number)=><label className="check" key={`${x}-${i}`}><input type="checkbox"/><span>{x}</span></label>)}</div></section>}
+function CampForm({initial,onClose,onSave}:any){const blank={name:"",area:"",type:"Dispersed",latitude:"",longitude:"",cost:"",reservation:"",rating:"",favorite:false,notes:"",source:"",source_url:"",last_verified_at:""};const [f,setF]=useState<any>(initial?{...initial,latitude:String(initial.latitude),longitude:String(initial.longitude),cost:initial.cost==null?"":String(initial.cost),rating:initial.rating==null?"":String(initial.rating)}:blank);const set=(k:string,v:any)=>setF((p:any)=>({...p,[k]:v}));return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><span className="eyebrow">CAMPSITE</span><h2>{initial?"Edit campsite":"Add campsite"}</h2></div><button onClick={onClose}>×</button></div><div className="form-grid">{[["name","Name"],["area","Area / region"],["latitude","Latitude"],["longitude","Longitude"],["cost","Cost / night"],["rating","Your rating 1–5"],["reservation","Reservation / access"],["source","Source"]].map(([k,l])=><label key={k}>{l}<input value={f[k]} onChange={e=>set(k,e.target.value)} /></label>)}</div><label>Type<select value={f.type} onChange={e=>set("type",e.target.value)}><option>Dispersed</option><option>Developed</option><option>Forest campground</option><option>Private campground</option><option>Other</option></select></label><label>Notes<textarea value={f.notes} onChange={e=>set("notes",e.target.value)} /></label><label>Source URL<input value={f.source_url} onChange={e=>set("source_url",e.target.value)} /></label><label className="check"><input type="checkbox" checked={f.favorite} onChange={e=>set("favorite",e.target.checked)}/><span>Favorite / preferred campsite</span></label><div className="modal-actions"><button onClick={onClose}>Cancel</button><button className="primary" onClick={()=>onSave({...f,latitude:Number(f.latitude),longitude:Number(f.longitude),cost:f.cost===""?null:Number(f.cost),rating:f.rating===""?null:Number(f.rating)})}>Save campsite</button></div></div></div>}
+function AuthModal({email,password,setEmail,setPassword,busy,onClose,onSignIn,onSignUp}:any){return <div className="modal-backdrop"><div className="modal auth"><div className="modal-head"><div><span className="eyebrow">ACCOUNT</span><h2>Save your planner.</h2></div><button onClick={onClose}>×</button></div><label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)}/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)}/></label><div className="modal-actions"><button disabled={busy} onClick={onSignIn}>Sign in</button><button className="primary" disabled={busy} onClick={onSignUp}>Create account</button></div></div></div>}
+function Stat({n,label}:any){return <div className="stat"><strong>{n}</strong><span>{label}</span></div>};function Card({title,text}:any){return <div className="feature-card"><h3>{title}</h3><p>{text}</p></div>};function EmptyState({title,action}:any){return <div className="empty"><strong>{title}</strong><button onClick={action}>Sign in</button></div>}
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true); setError("");
-    const supabase = createClient();
-    const result = mode === "signin"
-      ? await supabase.auth.signInWithPassword({ email, password })
-      : await supabase.auth.signUp({ email, password, options: { emailRedirectTo: `${window.location.origin}/auth/callback` } });
-    setBusy(false);
-    if (result.error) { setError(result.error.message); return; }
-    if (mode === "signup" && !result.data.session) {
-      setSaveMessage("Account created. Check your email to confirm your account, then sign in.");
-      onClose();
-      return;
-    }
-    setSaveMessage(mode === "signup" ? "Account created and signed in." : "Signed in.");
-    onSuccess();
-  }
-
-  return <div className="modal-backdrop" onClick={onClose}><div className="modal auth-modal" onClick={(e) => e.stopPropagation()}><button className="close" onClick={onClose}>×</button><span className="eyebrow">OVERLAND PLANNER ACCOUNT</span><h2>{mode === "signin" ? "Welcome back." : "Create your account."}</h2><p>Save trips, routes and planning details so they are available when you come back.</p><form onSubmit={submit}><label>Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" /></label><label>Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} autoComplete={mode === "signin" ? "current-password" : "new-password"} /></label>{error && <div className="auth-error">{error}</div>}<button className="primary-button full" disabled={busy}>{busy ? "Working…" : mode === "signin" ? "Sign in" : "Create account"}</button></form><button className="auth-switch" onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); }}>{mode === "signin" ? "Need an account? Create one" : "Already have an account? Sign in"}</button></div></div>;
-}
-
-function Overview({ totalMiles, fuelCost, usableRange, fullRange, tripBudget, fuelReserve, setFuelReserve, stops, setActiveTab, days, routeAlert, setRouteAlert }: any) {
-  return <><section className="hero"><div><span className="eyebrow">TRIP WORKSPACE</span><h2>Plan the miles.<br/><em>Enjoy the adventure.</em></h2><p>Build the route, research what is around it, and keep fuel, campsites, activities and budget connected.</p></div><div className="hero-stat"><span>ROUTE STATUS</span><strong>{routeAlert ? "1 fuel check" : "Looks good"}</strong><small>{routeAlert ? "Review remote legs before departure" : "No current planning alerts"}</small></div></section><section className="stat-grid"><Stat label="Trip Miles" value={`${Math.round(totalMiles).toLocaleString()} mi`} detail={`${days.length} planning days`} icon="↗" /><Stat label="Fuel Estimate" value={`$${Math.round(fuelCost)}`} detail="Based on current MPG + price" icon="⛽" /><Stat label="Safe Range" value={`${usableRange} mi`} detail={`${fuelReserve}% reserve · ${fullRange} full`} icon="↔" /><Stat label="Trip Budget" value={`$${Math.round(tripBudget).toLocaleString()}`} detail="Current planning estimate" icon="$" /></section><div className="dashboard-grid"><section className="panel route-panel"><div className="panel-header"><div><span className="eyebrow">ROUTE</span><h3>Trip at a glance</h3></div><button className="text-button" onClick={() => setActiveTab("Route")}>Open route →</button></div><div className="route-map"><div className="map-road road-a"/><div className="map-road road-b"/><div className="map-road road-c"/>{stops.slice(1).map((stop: Stop, i: number) => <div key={stop.id} className={`map-pin pin-${i % 6} ${stop.type}`}><span>{symbolFor(stop.type)}</span></div>)}<div className="map-label label-yellow">PLANNED ROUTE</div></div><div className="timeline">{stops.slice(0, 7).map((stop: Stop) => <TimelineRow key={stop.id} stop={stop} />)}</div></section><div className="right-column"><FuelPanel usableRange={usableRange} fullRange={fullRange} fuelReserve={fuelReserve} setFuelReserve={setFuelReserve} stops={stops} /><Suggestions routeAlert={routeAlert} setRouteAlert={setRouteAlert} /></div></div></>;
-}
-
-function RouteView({ stops, totalMiles, days, addDay, updateDay, usableRange, routeAlert, setRouteAlert, groupedDays }: any) {
-  const fuelLeg = stops.find((s: Stop) => s.type === "fuel")?.miles || 0;
-  const overRange = fuelLeg > usableRange;
-  return <section className="panel full-panel"><div className="page-intro"><span className="eyebrow">ROUTE BUILDER</span><h2>Shape the trip day by day.</h2><p>Every stop will eventually carry real coordinates, route distance and drive time. For now, the planner exposes the relationships we need before connecting live routing.</p></div>{routeAlert && <div className={`route-alert ${overRange ? "danger" : "warning"}`}><span>!</span><div><strong>{overRange ? "Fuel range needs attention" : "Fuel planning check"}</strong><small>{overRange ? `A planned leg is beyond your ${usableRange} mi safe range.` : `Confirm a fuel stop before remote legs. Your current safe range is ${usableRange} mi.`}</small></div><button onClick={() => setRouteAlert(false)}>Dismiss</button></div>}<div className="day-grid">{days.map((d: DayPlan) => <article className="day-card" key={d.day}><div className="day-number">DAY {d.day}</div><label>Day label<input value={d.label} onChange={(e) => updateDay(d.day, "label", e.target.value)} /></label><label>Destination<input value={d.destination} onChange={(e) => updateDay(d.day, "destination", e.target.value)} /></label><label>Overnight<input value={d.overnight} onChange={(e) => updateDay(d.day, "overnight", e.target.value)} /></label><label>Driving limit<select value={d.maxHours} onChange={(e) => updateDay(d.day, "maxHours", Number(e.target.value))}>{[3,4,5,6,7,8,9,10].map((h) => <option key={h} value={h}>{h} hours</option>)}</select></label></article>)}</div><div className="route-footer"><div><b>{Math.round(totalMiles).toLocaleString()} mi</b><span>current estimate</span></div><div><b>{stops.length}</b><span>planned stops</span></div><div><b>{groupedDays.length}</b><span>trip days</span></div><button className="ghost-button" onClick={addDay}>＋ Add day</button></div><div className="route-table">{stops.map((stop: Stop) => <div className="route-row" key={stop.id}><span className={`route-badge ${stop.type}`}>{symbolFor(stop.type)}</span><div><strong>{stop.title}</strong><span>{stop.subtitle}</span></div><span>{stop.day ? `Day ${stop.day}` : ""}</span><span>{stop.miles ? `${stop.miles} mi` : "Start"}</span><span>{stop.meta}</span></div>)}</div></section>;
-}
-
-function ResearchView({ candidates, researchType, setResearchType, researchArea, setResearchArea, saved, savedResearch, toggleSaved, addCandidate }: any) {
-  return <section className="research-layout"><div className="panel full-panel research-main"><div className="page-intro"><span className="eyebrow">TRIP RESEARCH ENGINE · PROTOTYPE</span><h2>Find the useful stuff before you leave.</h2><p>The app now has a place for research candidates. The next step is connecting live search, maps and routing so these cards are generated from your actual route and preferences.</p></div><div className="research-controls"><select value={researchType} onChange={(e) => setResearchType(e.target.value)}><option>All</option><option>Camp</option><option>Fuel</option><option>Attraction</option><option>Hike</option></select><select value={researchArea} onChange={(e) => setResearchArea(e.target.value)}><option>All</option><option>Yellowstone</option><option>Grand Teton</option><option>Cody</option></select><span>{candidates.length} candidates</span></div><div className="candidate-grid">{candidates.map((c: Candidate) => <article className="candidate-card" key={c.id}><div className={`candidate-icon ${c.type.toLowerCase()}`}>{symbolForResearch(c.type)}</div><div className="candidate-body"><div className="candidate-top"><span className="candidate-type">{c.type}</span><button className={savedResearch.includes(c.id) ? "save-button saved" : "save-button"} onClick={() => toggleSaved(c.id)}>{savedResearch.includes(c.id) ? "Saved" : "Save"}</button></div><h3>{c.name}</h3><p>{c.area} · {c.distance} mi from route</p><small>{c.detail}</small><div className="candidate-bottom"><span>{c.tag}</span><b>{c.score}% fit</b></div><button className="add-candidate" onClick={() => addCandidate(c)}>＋ Add to trip</button></div></article>)}</div></div><aside className="research-side"><section className="panel"><div className="panel-header"><div><span className="eyebrow">SHORTLIST</span><h3>Saved research</h3></div><span className="safe-badge">{saved.length}</span></div>{saved.map((c: Candidate) => <div className="saved-row" key={c.id}><span>{symbolForResearch(c.type)}</span><div><strong>{c.name}</strong><small>{c.type} · {c.area}</small></div></div>)}{!saved.length && <div className="empty">Save candidates you want to evaluate later.</div>}</section><section className="panel research-idea"><span className="eyebrow">NEXT AUTOMATION</span><h3>Route-aware research</h3><p>When live data is connected, the planner can search a corridor around each leg instead of making you search every town manually.</p><div className="mini-flow"><span>Route</span><i>→</i><span>Search radius</span><i>→</i><span>Rank</span></div></section></aside></section>;
-}
-
-function FuelView({ stops, usableRange, fullRange, fuelCost, gasPrice, setGasPrice, mpg, tank }: any) {
-  const fuelStops = stops.filter((s: Stop) => s.type === "fuel");
-  return <section className="panel full-panel"><div className="page-intro"><span className="eyebrow">FUEL PLAN</span><h2>Know where the tank gets you.</h2><p>Fuel planning is a first-class part of the route. Next we can turn each leg into an actual station-to-station calculation and flag remote gaps.</p></div><div className="fuel-summary"><div><span>Full tank range</span><b>{fullRange} mi</b></div><div><span>Safe planning range</span><b>{usableRange} mi</b></div><div><span>Estimated trip fuel</span><b>${Math.round(fuelCost)}</b></div><label><span>Planning gas price</span><input type="number" min="0" step="0.01" value={gasPrice} onChange={(e) => setGasPrice(Number(e.target.value))} /></label></div><div className="fuel-callout"><span className="safe-badge">CURRENT ASSUMPTION</span><strong>{mpg} MPG · {tank} gal tank</strong><span>Safe range intentionally leaves a reserve.</span></div><div className="fuel-list large">{fuelStops.length ? fuelStops.map((s: Stop) => <div className="fuel-row" key={s.id}><span className="fuel-icon">⛽</span><div><strong>{s.title}</strong><small>{s.subtitle}</small></div><em>{s.miles} mi into route</em></div>) : <div className="empty">No fuel stops yet. Use Research to add candidates.</div>}</div></section>;
-}
-
-function BudgetView({ fuelCost, foodBudget, setFoodBudget, parkBudget, setParkBudget, campBudget, setCampBudget, funBudget, setFunBudget, bufferBudget, setBufferBudget, tripBudget }: any) {
-  const rows = [{ label: "Fuel", value: fuelCost, fixed: true }, { label: "Food", value: foodBudget, set: setFoodBudget }, { label: "National park fees", value: parkBudget, set: setParkBudget }, { label: "Camping", value: campBudget, set: setCampBudget }, { label: "Activities / souvenirs", value: funBudget, set: setFunBudget }, { label: "Emergency / buffer", value: bufferBudget, set: setBufferBudget }];
-  return <section className="panel full-panel"><div className="page-intro"><span className="eyebrow">TRIP BUDGET</span><h2>Plan the money before the miles.</h2><p>Fuel is calculated from the route and vehicle assumptions. The other categories are editable allowances until live prices can be added.</p></div>{rows.map((r) => <div className="budget-row" key={r.label}><span>{r.label}</span>{r.set ? <input className="inline-number" type="number" min="0" value={r.value} onChange={(e) => r.set(Number(e.target.value))} /> : <b>${Math.round(r.value).toLocaleString()}</b>}</div>)}<div className="budget-total"><span>Estimated trip total</span><strong>${Math.round(tripBudget).toLocaleString()}</strong></div></section>;
-}
-
-function PackView({ packing, setPacking, newItem, setNewItem, addPackingItem }: any) { return <section className="panel full-panel"><div className="page-intro"><span className="eyebrow">PACK LIST</span><h2>Build once. Reuse every trip.</h2><p>Keep your core overlanding loadout here. Saved templates and vehicle-specific checklists can come next.</p></div><div className="add-item"><input value={newItem} onChange={(e) => setNewItem(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addPackingItem()} placeholder="Add a packing item..." /><button className="primary-button" onClick={addPackingItem}>Add</button></div>{packing.map((item: any) => <label className="check-row" key={item.id}><input type="checkbox" checked={item.done} onChange={() => setPacking((items: any[]) => items.map((x) => x.id === item.id ? { ...x, done: !x.done } : x))} /><span className={item.done ? "checked" : ""}>{item.name}</span></label>)}</section>; }
-
-function SimpleList({ title, eyebrow, items, empty }: any) { return <section className="panel full-panel"><div className="page-intro"><span className="eyebrow">{eyebrow}</span><h2>{title}</h2><p>Current trip candidates. Live research will eventually populate these from your route and preferences.</p></div>{items.length ? items.map((item: string, i: number) => <div className="list-row" key={i}><span className="list-icon">{i + 1}</span><div><strong>{item.split(" · ")[0]}</strong><small>{item.split(" · ").slice(1).join(" · ")}</small></div><em>Candidate</em></div>) : <div className="empty">{empty}</div>}</section>; }
-function Stat({ label, value, detail, icon }: any) { return <div className="stat-card"><span className="stat-icon">{icon}</span><span className="eyebrow">{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
-function TimelineRow({ stop }: { stop: Stop }) { return <div className="timeline-row"><span className={`timeline-dot ${stop.type}`}>{symbolFor(stop.type)}</span><div className="timeline-main"><strong>{stop.title}</strong><span>{stop.subtitle}</span></div><div className="timeline-meta"><strong>{stop.miles ? `${stop.miles} mi` : "Start"}</strong><span>{stop.meta}</span></div></div>; }
-function FuelPanel({ usableRange, fullRange, fuelReserve, setFuelReserve, stops }: any) { const fuelStops = stops.filter((s: Stop) => s.type === "fuel"); return <section className="panel fuel-panel"><div className="panel-header"><div><span className="eyebrow">FUEL SAFETY</span><h3>Safe driving range</h3></div><span className="safe-badge">Planning buffer</span></div><div className="range-number"><strong>{usableRange}</strong><span>miles</span></div><div className="range-track"><span style={{ width: `${Math.max(0, Math.min(100, usableRange / Math.max(fullRange, 1) * 100))}%` }} /></div><div className="range-labels"><span>Reserve</span><span>{fullRange} mi full</span></div><div className="slider-label"><span>Reserve</span><b>{fuelReserve}%</b></div><input className="slider" type="range" min="0" max="40" value={fuelReserve} onChange={(e) => setFuelReserve(Number(e.target.value))} />{fuelStops.slice(0, 3).map((s: Stop) => <div className="fuel-row" key={s.id}><span className="fuel-icon">⛽</span><div><strong>{s.title}</strong><small>{s.miles} mi into route</small></div><em>Planned</em></div>)}</section>; }
-function Suggestions({ routeAlert, setRouteAlert }: any) { return <section className="panel suggestions-panel"><div className="panel-header"><div><span className="eyebrow">DISCOVER</span><h3>Research engine</h3></div><span className="safe-badge">Prototype</span></div><div className="suggestion"><span className="suggestion-icon">⌕</span><div><strong>8 route-aware candidates</strong><span>Camping, fuel, hikes and attractions</span></div><button className="mini-button" onClick={() => setRouteAlert(true)}>Review</button></div><div className="suggestion"><span className="suggestion-icon">⛽</span><div><strong>Fuel safety check</strong><span>Keep a reserve before remote legs</span></div><small>{routeAlert ? "Review" : "Clear"}</small></div></section>; }
-function symbolFor(type: StopType) { return type === "fuel" ? "⛽" : type === "camp" ? "⌂" : type === "attraction" ? "✦" : type === "destination" ? "◆" : "●"; }
-function symbolForResearch(type: Candidate["type"]) { return type === "Fuel" ? "⛽" : type === "Camp" ? "⌂" : type === "Hike" ? "⌁" : "✦"; }
-function iconFor(item: string) { return ({ Overview: "▦", Route: "⌁", Research: "⌕", Campsites: "⌂", Fuel: "⛽", Attractions: "✦", Budget: "$", "Pack List": "✓" } as Record<string, string>)[item]; }
+function encodePolyline6(coords:number[][]){let lastLat=0,lastLng=0,out="";for(const [lng,lat] of coords){const lat6=Math.round(lat*1e6),lng6=Math.round(lng*1e6);out+=encodeSigned(lat6-lastLat)+encodeSigned(lng6-lastLng);lastLat=lat6;lastLng=lng6;}return out}
+function encodeSigned(v:number){let n=v<0?~(v<<1):(v<<1);let s="";while(n>=0x20){s+=String.fromCharCode((0x20|(n&0x1f))+63);n>>=5}s+=String.fromCharCode(n+63);return s}

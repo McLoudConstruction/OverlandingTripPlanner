@@ -1,48 +1,33 @@
-# Overland Planner — MVP 0.5
+# Overland Planner MVP 0.6
 
-Version 0.5 establishes the real data foundation without making the product dependent on paid AI or undocumented third-party scraping.
+Focused trip logistics app built around:
+- personal campsite library with List / Map views
+- trips made from saved campsite stops
+- Mapbox routing and gas-station discovery along the route
+- vehicle fuel-range planning
+- budget and reusable pack list
+- Supabase persistence and authentication
 
-## Stack
-- Next.js + React + TypeScript
-- Supabase Postgres + Row Level Security
-- Supabase SSR helpers for Next.js
-- Vercel deployment
+## Deploy
 
-## What changed
-- Added Supabase browser/server clients.
-- Added Next.js proxy for Supabase auth session refresh.
-- Added a Supabase migration for trips, trip days, sources, places, trip places, budgets and packing items.
-- Added source provenance fields to the place model.
-- Seeded the source registry with NPS, BLM, USFS, Recreation.gov RIDB, OpenStreetMap and iOverlander as an external source.
-- Added a Save to Supabase action to the prototype. It safely falls back when Supabase environment variables/auth are not configured.
-- Added RLS policies so trip-owned records are isolated by authenticated user.
-
-## Supabase setup
-1. Create a Supabase project.
-2. In Supabase SQL Editor, run `supabase/migrations/0001_overland_foundation.sql`.
-3. In Vercel Project Settings → Environment Variables, add:
+1. Run `supabase/migrations/0001_overland_foundation.sql` if this is a new Supabase project.
+2. Run `supabase/migrations/0002_simplify_overland.sql`.
+3. Add these Vercel environment variables:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
+   - `NEXT_PUBLIC_MAPBOX_TOKEN`
+   - `COLLECTAPI_TOKEN` (when CollectAPI pricing is enabled)
+   - `COLLECTAPI_GAS_ENDPOINT` (the exact Gas Prices endpoint from your CollectAPI account)
 4. Redeploy.
 
-Supabase's current Next.js guidance uses `@supabase/ssr` for cookie-based sessions and `NEXT_PUBLIC_SUPABASE_URL` plus the publishable key for the client. See the official docs: https://supabase.com/docs/guides/getting-started/quickstarts/nextjs
+## Mapbox
 
-## Important
-This version does not scrape or bulk-copy iOverlander, GasBuddy or other third-party datasets. The schema is designed so approved APIs, open datasets and licensed/community sources can be added later without redesigning the app.
+The app uses Mapbox for map display, driving routes, and gas-station discovery along a route. The Directions API supports multi-stop driving routes, and Search Box supports category searches along a supplied route. Keep the public Mapbox token in `NEXT_PUBLIC_MAPBOX_TOKEN`.
 
-## Run locally
-```bash
-npm install
-npm run dev
-```
+## CollectAPI
 
+CollectAPI currently advertises a Gas Prices API with gasoline and diesel prices at fuel stations in cities. The exact endpoint/parameters should be taken from the user's CollectAPI account documentation before enabling live price lookups. The 0.6 data model is ready for station prices, but does not guess an endpoint or pretend that a city-level price is an exact station price.
 
-## MVP 0.5 changes
-- Added email/password Supabase authentication UI.
-- Added Next.js 15-compatible `middleware.ts` for Supabase session refresh.
-- Added `/auth/callback` for email confirmation / PKCE callback handling.
-- Added Save Trip, My Trips, Load Trip, and Sign Out controls.
-- Saving an existing trip updates it instead of creating a duplicate.
-- Trip days are replaced on save so edits stay synchronized.
+## Product boundary
 
-After deploying, add the same Supabase environment variables from `.env.example` to Vercel. In Supabase Auth settings, make sure your site's URL is configured. If email confirmation is enabled, new users will receive a confirmation email.
+The app intentionally does not research campsites, attractions, hikes, or activities. Find campsites wherever you prefer, then save the useful ones into your personal library. iOverlander can remain part of that external research workflow.
