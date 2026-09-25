@@ -205,7 +205,12 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
       });
       let next=candidates;
       if(token){
-        next=await geocodeMissing(candidates,token);
+        // First resolve any rows that do not have coordinates. Then derive the
+        // area from the coordinates for EVERY row. This prevents the importer
+        // from using an unrelated city that happened to be present in the
+        // Google Maps URL or search text.
+        next=await geocodeMissing(next,token);
+        next=await reverseGeocodeAreas(next,token);
       }
       setRows(next);
     }catch(e:any){setError(e?.message||"Could not read that CSV.")}
@@ -218,16 +223,58 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
       const r=output[i];
       if(r.latitude!=null&&r.longitude!=null)continue;
       try{
-        const q=encodeURIComponent(r.name);
-        const response=await fetch(`https://api.mapbox.com/search/geocode/v6/forward?q=${q}&country=US&limit=1&access_token=${mapboxToken}`);
+        const q=encodeURIComponent(`${r.name}, United States`);
+        const response=await fetch(`https://api.mapbox.com/search/geocode/v6/forward?q=${q}&country=US&limit=1&types=poi,address,place&access_token=${mapboxToken}`);
         if(response.ok){
           const data=await response.json();const feature=data.features?.[0];const coords=feature?.geometry?.coordinates;
           if(Array.isArray(coords)&&coords.length===2){
-            const context=feature.properties?.context||{};
-            const area=context.place?.name||context.locality?.name||context.district?.name||"";
-            output[i]={...r,latitude:Number(coords[1]),longitude:Number(coords[0]),area, status:"ready"};
+            output[i]={...r,latitude:Number(coords[1]),longitude:Number(coords[0]),status:"ready"};
           }
         }
+      }catch{}
+    }
+    return output;
+  }
+
+  async function reverseGeocodeAreas(input:ImportCandidate[],mapboxToken:string){
+    const output=[...input];
+    const targets=input.map((r,index)=>({r,index})).filter(x=>x.r.latitude!=null&&x.r.longitude!=null);
+    for(let start=0;start<targets.length;start+=1000){
+      const chunk=targets.slice(start,start+1000);
+      try{
+        const body=chunk.map(({r})=>({
+          types:["place","locality","district","region"],
+          longitude:r.longitude,
+          latitude:r.latitude,
+          country:"us",
+          limit:1
+        }));
+        const response=await fetch(`https://api.mapbox.com/search/geocode/v6/batch?access_token=${mapboxToken}`,{
+          method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)
+        });
+        if(!response.ok)continue;
+        const data=await response.json();
+        const results=Array.isArray(data.batch)?data.batch:[];
+        results.forEach((result:any,j:number)=>{
+          const target=chunk[j];
+          if(!target)return;
+          const feature=result?.features?.[0];
+          if(!feature)return;
+          const context=feature.properties?.context||{};
+          const featureType=feature.properties?.feature_type||feature.properties?.featureType;
+          const featureName=feature.properties?.name_preferred||feature.properties?.name||"";
+          const place=context.place?.name || (featureType==="place"?featureName:"");
+          const locality=context.locality?.name || (featureType==="locality"?featureName:"");
+          const district=context.district?.name || (featureType==="district"?featureName:"");
+          const region=context.region?.name || (featureType==="region"?featureName:"");
+          const shortCode=String(context.region?.short_code||"").toUpperCase();
+          const stateCode=shortCode.includes("-")?shortCode.split("-").pop()||"":shortCode;
+          const state=stateCode.length===2?stateCode:(STATE_NAMES[region]||"");
+          const base=place||locality||district||region;
+          if(base){
+            output[target.index]={...output[target.index],area:state&&base!==region?`${base}, ${state}`:base};
+          }
+        });
       }catch{}
     }
     return output;
@@ -240,15 +287,15 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
 
   return <div className="modal-backdrop"><div className="modal importer-modal">
     <div className="modal-head"><div><span className="eyebrow">CAMPSITE IMPORTER</span><h2>Bring in your Google Maps saves.</h2><p className="muted">Export your Google Maps Saved list as a CSV, upload it here, review the places, then import only the campsites you want to keep.</p></div><button onClick={onClose}>×</button></div>
-    {!rows.length&&<div className="import-drop"><div className="import-icon">↓</div><h3>Upload your Google Maps CSV</h3><p>Google Takeout → Saved → download the CSV files, then choose one or several here.</p><label className="upload-button">Choose CSV files<input type="file" multiple accept=".csv,text/csv" onChange={e=>{const files=Array.from(e.target.files||[]);if(files.length)handleFiles(files)}}/></label>{fileName&&<span className="muted">{fileName}</span>}{error&&<div className="warning-box">{error}</div>}</div>}
+    {!rows.length&&<div className="import-drop"><div className="import-icon">↓</div><h3>Upload your Google Maps CSV</h3><p>Google Takeout → Saved → download the CSV files, then choose one or several here.</p><label className="upload-button">Choose CSV files<input type="file" multiple accept=".csv,text/csv" onChange={e=>{const files=Array.from(e.target.files||[]) as File[];if(files.length)handleFiles(files)}}/></label>{fileName&&<span className="muted">{fileName}</span>}{error&&<div className="warning-box">{error}</div>}</div>}
     {busy&&<div className="loading">Reading your saved places and locating anything that needs coordinates…</div>}
     {rows.length>0&&!busy&&<>
       <div className="import-summary"><div><strong>{rows.length}</strong><span>saved places found</span></div><div><strong>{selectedCount}</strong><span>ready to import</span></div><div><strong>{unresolved}</strong><span>need a location</span></div></div>
-      <div className="import-note"><strong>Review before importing.</strong> Places that aren't campsites can be removed with <b>Skip</b>. You can also edit the name, area, type, or coordinates before importing.</div>
+      <div className="import-note"><strong>Review before importing.</strong> Area is calculated from the campsite coordinates, not from the Google Maps list or URL. Places that aren't campsites can be removed with <b>Skip</b>. You can also edit the name, area, type, or coordinates before importing.</div>
       <div className="import-list">{rows.map(r=><div className={`import-row ${r.selected?"":"skipped"}`} key={r.key}>
         <div className="import-check"><input type="checkbox" checked={r.selected} onChange={e=>update(r.key,{selected:e.target.checked})}/></div>
         <div className="import-fields">
-          <div className="import-grid"><label>Name<input value={r.name} onChange={e=>update(r.key,{name:e.target.value})}/></label><label>Area<input value={r.area} onChange={e=>update(r.key,{area:e.target.value})}/></label><label>Type<select value={r.type} onChange={e=>update(r.key,{type:e.target.value})}><option>Other</option><option>Dispersed</option><option>Developed</option><option>Forest campground</option><option>Private campground</option></select></label><label>Latitude<input type="number" step="any" value={r.latitude??""} onChange={e=>update(r.key,{latitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label><label>Longitude<input type="number" step="any" value={r.longitude??""} onChange={e=>update(r.key,{longitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label></div>
+          <div className="import-grid"><label>Name<input value={r.name} onChange={e=>update(r.key,{name:e.target.value})}/></label><label>Area / region<input value={r.area} onChange={e=>update(r.key,{area:e.target.value})}/></label><label>Type<select value={r.type} onChange={e=>update(r.key,{type:e.target.value})}><option>Other</option><option>Dispersed</option><option>Developed</option><option>Forest campground</option><option>Private campground</option></select></label><label>Latitude<input type="number" step="any" value={r.latitude??""} onChange={e=>update(r.key,{latitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label><label>Longitude<input type="number" step="any" value={r.longitude??""} onChange={e=>update(r.key,{longitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label></div>
           <div className="import-meta"><span className={r.latitude!=null&&r.longitude!=null?"ready-text":"needs-text"}>{r.latitude!=null&&r.longitude!=null?"Location ready":"Location needed"}</span>{r.source_url&&<a href={r.source_url} target="_blank" rel="noreferrer">Open Google Maps ↗</a>}</div>
         </div>
         <button className="skip-button" onClick={()=>remove(r.key)}>Skip</button>
