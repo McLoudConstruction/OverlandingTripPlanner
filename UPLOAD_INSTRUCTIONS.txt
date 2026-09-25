@@ -1,14 +1,19 @@
-Range-aware fuel stop planner update
+Trip screen + range-aware fuel planner (cumulative update against your current main)
 
-Files (same folder layout as the repo; upload over the existing ones):
-  app/page.tsx      (modified)
-  app/map.tsx       (modified)
-  app/globals.css   (modified)
-  lib/fuel.ts       (NEW)
+Upload over the existing repo, same folder layout:
+  app/page.tsx         (modified)
+  app/globals.css      (modified)
+  app/map.tsx          (modified)
+  app/trip-map.tsx     (NEW)
+  app/trip-planner.tsx (NEW)
+  lib/fuel.ts          (NEW)
+  lib/tripOrder.ts     (NEW)
 
-GitHub web upload: open the repo > Add file > Upload files, drag the "app" and
-"lib" folders from this zip (not the zip itself), and commit. Vercel redeploys
-automatically. No new dependencies or environment variables are needed.
+This includes the earlier fuel-planner update, so it is safe whether or not you
+already uploaded that one.
 
-fuel-range-planner.patch is the same change as a git patch, for
-"git apply fuel-range-planner.patch" if you prefer the command line.
+GitHub web upload: repo > Add file > Upload files, drag the "app" and "lib"
+folders from this zip (not the zip itself), commit. Vercel redeploys.
+No new packages, no new environment variables, no database migration.
+
+trip-screen-and-fuel-planner.patch is the same change for: git apply <file>

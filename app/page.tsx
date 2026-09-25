@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import MapboxMap from "./map";
+import TripPlanner from "./trip-planner";
 import { STATE_NAMES, CA_REGIONS, extractPlaceCoordinates, regionFromFeature, usStateCode } from "@/lib/geo";
+import { cheapestInsertionIndex, pointsKey, stopsSaveKey, type PathPoint } from "@/lib/tripOrder";
 import { MIN_ARRIVAL_RANGE_MILES, computeRange, findStationsAlongRoute, planFuelStops, type FuelStation, type FuelStopPlan } from "@/lib/fuel";
 
 type Campsite = {
@@ -51,7 +53,7 @@ const sampleCampsites: Campsite[] = [
 ];
 
 export default function Home() {
-  const [tab,setTab]=useState<"Dashboard"|"Trips"|"Campsites"|"Fuel"|"Budget"|"Pack List">("Dashboard");
+  const [tab,setTab]=useState<"Dashboard"|"Trips"|"Trip"|"Campsites"|"Fuel"|"Budget"|"Pack List">("Dashboard");
   const [view,setView]=useState<"list"|"map">("list");
   const [userEmail,setUserEmail]=useState(""); const [authOpen,setAuthOpen]=useState(false); const [authBusy,setAuthBusy]=useState(false); const [authEmail,setAuthEmail]=useState(""); const [authPassword,setAuthPassword]=useState("");
   const [message,setMessage]=useState("");
@@ -59,17 +61,34 @@ export default function Home() {
   const [showCampForm,setShowCampForm]=useState(false); const [showImporter,setShowImporter]=useState(false); const [editing,setEditing]=useState<Campsite|null>(null); const [search,setSearch]=useState(""); const [areaFilter,setAreaFilter]=useState("All");
   const [trips,setTrips]=useState<Trip[]>([]); const [tripName,setTripName]=useState("Yellowstone Adventure"); const [start,setStart]=useState("Kansas City, MO"); const [selectedTrip,setSelectedTrip]=useState<Trip|null>(null);
   const [mpg,setMpg]=useState(15); const [tank,setTank]=useState(36); const [reserve,setReserve]=useState(15); const [priceCushion,setPriceCushion]=useState(0.30); const [mileageBuffer,setMileageBuffer]=useState(10);
-  const [stops,setStops]=useState<Stop[]>([]); const [routeLoading,setRouteLoading]=useState(false); const [route,setRoute]=useState<any>(null); const [fuelStations,setFuelStations]=useState<FuelStation[]>([]); const [fuelStopPlan,setFuelStopPlan]=useState<FuelStopPlan|null>(null); const [fuelPlan,setFuelPlan]=useState<FuelPlan|null>(null);
+  const [stops,setStops]=useState<Stop[]>([]); const [routeLoading,setRouteLoading]=useState(false); const [route,setRoute]=useState<any>(null); const [fuelStations,setFuelStations]=useState<FuelStation[]>([]); const [fuelStopPlan,setFuelStopPlan]=useState<FuelStopPlan|null>(null);
+  const [tripStart,setTripStart]=useState(""); const [tripStartPoint,setTripStartPoint]=useState<PathPoint|null>(null); const [routeKey,setRouteKey]=useState("");
+  const lastSavedStops=useRef(""); const loadingStops=useRef(false); const saveQueue=useRef<Promise<void>>(Promise.resolve()); const [fuelPlan,setFuelPlan]=useState<FuelPlan|null>(null);
   const [budget,setBudget]=useState({camp:300,food:500,fees:100,other:200});
   const [pack,setPack]=useState(["Recovery boards","Air compressor","First aid kit","Headlamps","Water storage","Camp stove","Cooler","Tool kit"]);
   const [newPack,setNewPack]=useState("");
 
   useEffect(()=>{ const sb=createClient(); let mounted=true; sb.auth.getUser().then(({data})=>{if(mounted)setUserEmail(data.user?.email||"")}); const {data}=sb.auth.onAuthStateChange((_e,s)=>mounted&&setUserEmail(s?.user?.email||"")); return()=>{mounted=false;data.subscription.unsubscribe()}; },[]);
-  useEffect(()=>{ if(userEmail) { loadCampsites(); loadTrips(); } else { setCampsites([]); setTrips([]); setSelectedTrip(null); setStops([]); setRoute(null); setFuelPlan(null); setFuelStations([]); setFuelStopPlan(null); } },[userEmail]);
+  useEffect(()=>{ if(userEmail) { loadCampsites(); loadTrips(); } else { setCampsites([]); setTrips([]); setSelectedTrip(null); setStops([]); setRoute(null); setFuelPlan(null); setFuelStations([]); setFuelStopPlan(null); setRouteKey(""); setTripStart(""); setTripStartPoint(null); } },[userEmail]);
 
   async function loadCampsites(){setLoadingCamps(true); const sb=createClient(); const {data,error}=await sb.from("campsites").select("*").order("name"); if(error){setMessage(error.message)} else setCampsites(data||[]); setLoadingCamps(false)}
   async function loadTrips(){const sb=createClient(); const {data,error}=await sb.from("trips").select("id,name,start_location,destinations,mpg,tank_gallons,fuel_reserve_percent,fuel_price_cushion,fuel_mileage_buffer,created_at").order("created_at",{ascending:false}); if(error)setMessage(error.message); setTrips(data||[])}
-  async function selectTrip(t:Trip){setSelectedTrip(t);setMpg(t.mpg||15);setTank(t.tank_gallons||36);setReserve(t.fuel_reserve_percent??15);setPriceCushion(t.fuel_price_cushion??0.30);setMileageBuffer(t.fuel_mileage_buffer??10);setRoute(null);setFuelPlan(null);setFuelStations([]);setFuelStopPlan(null);const {data,error}=await createClient().from("trip_stops").select("id,name,latitude,longitude,campsite_id,stop_order,notes").eq("trip_id",t.id).order("stop_order");if(error)setMessage(error.message);setStops(data||[])}
+  async function selectTrip(t:Trip){
+    setSelectedTrip(t);setMpg(t.mpg||15);setTank(t.tank_gallons||36);setReserve(t.fuel_reserve_percent??15);setPriceCushion(t.fuel_price_cushion??0.30);setMileageBuffer(t.fuel_mileage_buffer??10);
+    setRoute(null);setRouteKey("");clearFuel();setTripStart(t.start_location||"");setTripStartPoint(null);
+    loadingStops.current=true;setStops([]); // never autosave the previous trip's stops into this one
+    const {data,error}=await createClient().from("trip_stops").select("id,name,latitude,longitude,campsite_id,stop_order,notes").eq("trip_id",t.id).order("stop_order");
+    if(error)setMessage(error.message);
+    const rows=data||[];lastSavedStops.current=stopsSaveKey(rows);setStops(rows);loadingStops.current=false;
+  }
+  function clearFuel(){setFuelPlan(null);setFuelStations([]);setFuelStopPlan(null)}
+  async function openTrip(t:Trip){await selectTrip(t);setTab("Trip")}
+  async function commitStart(text:string){
+    if(!selectedTrip)return;
+    const {data,error}=await createClient().from("trips").update({start_location:text||null}).eq("id",selectedTrip.id).select().single();
+    if(error){setMessage(error.message);return}
+    setSelectedTrip(data);setTrips(prev=>prev.map(x=>x.id===data.id?data:x));
+  }
   async function auth(mode:"signin"|"signup"){setAuthBusy(true);setMessage("");const sb=createClient();const fn=mode==="signin"?sb.auth.signInWithPassword({email:authEmail,password:authPassword}):sb.auth.signUp({email:authEmail,password:authPassword});const {error}=await fn;if(error)setMessage(error.message);else {setMessage(mode==="signup"?"Account created. Check your email if confirmation is required.":"Signed in.");setAuthOpen(false)}setAuthBusy(false)}
   async function signOut(){await createClient().auth.signOut();setMessage("Signed out.")}
 
@@ -99,9 +118,30 @@ export default function Home() {
     await loadCampsites();
     setMessage(`${selected.length} campsite${selected.length===1?"":"s"} imported.`);
   }
-  async function createTrip(){if(!userEmail){setAuthOpen(true);return}const sb=createClient();const {data:user}=await sb.auth.getUser();const {data,error}=await sb.from("trips").insert({user_id:user.user?.id,name:tripName,start_location:start,destinations:[],mpg,tank_gallons:tank,fuel_reserve_percent:reserve,fuel_price_cushion:priceCushion,fuel_mileage_buffer:mileageBuffer}).select().single();if(error){setMessage(error.message);return}setTrips([data,...trips]);await selectTrip(data);setTab("Trips");setMessage("Trip created.")}
-  function addStop(c:Campsite){setStops(prev=>[...prev,{name:c.name,latitude:c.latitude,longitude:c.longitude,campsite_id:c.id,stop_order:prev.length}]);setTab("Trips")}
-  async function saveStops(){if(!selectedTrip)return;const sb=createClient();await sb.from("trip_stops").delete().eq("trip_id",selectedTrip.id);const {error}=await sb.from("trip_stops").insert(stops.map((s,i)=>({trip_id:selectedTrip.id,campsite_id:s.campsite_id||null,name:s.name,latitude:s.latitude,longitude:s.longitude,stop_order:i,notes:s.notes||""})));setMessage(error?error.message:"Trip stops saved.")}
+  async function createTrip(){if(!userEmail){setAuthOpen(true);return}const sb=createClient();const {data:user}=await sb.auth.getUser();const {data,error}=await sb.from("trips").insert({user_id:user.user?.id,name:tripName,start_location:start,destinations:[],mpg,tank_gallons:tank,fuel_reserve_percent:reserve,fuel_price_cushion:priceCushion,fuel_mileage_buffer:mileageBuffer}).select().single();if(error){setMessage(error.message);return}setTrips([data,...trips]);await selectTrip(data);setTab("Trip");setMessage("Trip created.")}
+  // "＋ Trip" on the Campsites list: add to the open trip at the cheapest spot, then show the Trip screen.
+  function addStop(c:Campsite){
+    if(!selectedTrip){setMessage("Open or create a trip first, then add campsites to it.");setTab("Trips");return}
+    if(stops.some(x=>x.campsite_id===c.id)){setMessage(`${c.name} is already on this trip.`);setTab("Trip");return}
+    const idx=cheapestInsertionIndex(tripStartPoint,stops,c);
+    setStops([...stops.slice(0,idx),{name:c.name,latitude:c.latitude,longitude:c.longitude,campsite_id:c.id,stop_order:idx},...stops.slice(idx)].map((x,i)=>({...x,stop_order:i})));
+    setTab("Trip");
+  }
+  // Saves the current stops. Saves are queued so overlapping autosaves never interleave delete/insert.
+  function saveStops(silent=false):Promise<void>{
+    if(!selectedTrip||loadingStops.current)return saveQueue.current;
+    const tripId=selectedTrip.id;const list=stops;const key=stopsSaveKey(list);
+    if(silent&&key===lastSavedStops.current)return saveQueue.current;
+    saveQueue.current=saveQueue.current.then(async()=>{
+      const sb=createClient();
+      const del=await sb.from("trip_stops").delete().eq("trip_id",tripId);
+      if(del.error){setMessage(del.error.message);return}
+      const {error}=await sb.from("trip_stops").insert(list.map((st,i)=>({trip_id:tripId,campsite_id:st.campsite_id||null,name:st.name,latitude:st.latitude,longitude:st.longitude,stop_order:i,notes:st.notes||""})));
+      if(error){setMessage(error.message);return}
+      lastSavedStops.current=key;if(!silent)setMessage("Trip stops saved.");
+    });
+    return saveQueue.current;
+  }
   async function saveVehicleSettings(){if(!selectedTrip)return;const payload={mpg,tank_gallons:tank,fuel_reserve_percent:reserve,fuel_price_cushion:priceCushion,fuel_mileage_buffer:mileageBuffer};const {data,error}=await createClient().from("trips").update(payload).eq("id",selectedTrip.id).select().single();if(error){setMessage(error.message);return}setSelectedTrip(data);setTrips(prev=>prev.map(t=>t.id===data.id?data:t));setMessage("Vehicle and fuel settings saved.")}
 
   async function getStopStates(points:Stop[], token:string):Promise<string[]> {
@@ -133,13 +173,13 @@ export default function Home() {
     const token=process.env.NEXT_PUBLIC_MAPBOX_TOKEN;if(!token){setMessage("Add NEXT_PUBLIC_MAPBOX_TOKEN in Vercel to enable maps and routing.");return}
     setRouteLoading(true);setMessage("");
     try {
-      const startPoint=start.trim()?await geocodeStart(start.trim(),token):null;
+      const startPoint=tripStartPoint||(tripStart.trim()?await geocodeStart(tripStart.trim(),token):null);
       const routePoints:any[]=startPoint?[startPoint,...stops]:stops;
       if(routePoints.length<2)throw new Error("Add a starting point or at least two campsite stops.");
       const coords=routePoints.map(s=>`${s.longitude},${s.latitude}`).join(";");
       const res=await fetch(`https://api.mapbox.com/directions/v5/mapbox/driving/${coords}?geometries=geojson&overview=full&steps=false&access_token=${token}`);const data=await res.json();
       if(!res.ok||data.code!=="Ok")throw new Error(data.message||"Mapbox routing failed.");
-      const currentRoute=data.routes?.[0];setRoute(currentRoute||null);
+      const currentRoute=data.routes?.[0];setRoute(currentRoute||null);setRouteKey(pointsKey(routePoints));
       const geometry=currentRoute?.geometry;
       const vehicle={mpg,tankGallons:tank,reservePercent:reserve,mileageBufferPercent:mileageBuffer};
       // Station search runs alongside the state lookup and EIA price fetch below.
@@ -153,7 +193,7 @@ export default function Home() {
         const state=states[i+1]||states[i]||"";const priceInfo=priceMap.get(state);const miles=leg.distance/1609.344;const gallons=mpg>0?miles*(1+mileageBuffer/100)/mpg:0;const price=typeof priceInfo?.price==="number"?priceInfo.price:null;const planningPrice=price==null?null:price+priceCushion;return {from:routePoints[i]?.name||`Stop ${i+1}`,to:routePoints[i+1]?.name||`Stop ${i+2}`,state,miles,price,planningPrice,gallons,cost:planningPrice==null?null:gallons*planningPrice,source:priceInfo?.source||null,period:priceInfo?.period||null,geography:priceInfo?.geography||null};
       });
       const valid=segments.filter(s=>s.cost!=null);const bufferedMiles=segments.reduce((a,s)=>a+s.miles,0)*(1+mileageBuffer/100);const gallons=segments.reduce((a,s)=>a+s.gallons,0);const estimatedCost=valid.length===segments.length?segments.reduce((a,s)=>a+(s.cost||0),0):null;const baselinePrice=gallons?segments.reduce((a,s)=>a+(s.price||0)*s.gallons,0)/gallons:null;const planningPrice=gallons?segments.reduce((a,s)=>a+(s.planningPrice||0)*s.gallons,0)/gallons:null;
-      const warning=priceResponse&&!priceResponse.ok?"EIA pricing is not available yet. Add EIA_API_KEY in Vercel to calculate the fuel budget.":estimatedCost==null?"One or more route segments is missing a fuel price.":start.trim()&&!startPoint?"Starting point could not be geocoded, so the route starts at the first campsite.":null;
+      const warning=priceResponse&&!priceResponse.ok?"EIA pricing is not available yet. Add EIA_API_KEY in Vercel to calculate the fuel budget.":estimatedCost==null?"One or more route segments is missing a fuel price.":tripStart.trim()&&!startPoint?"Starting point could not be geocoded, so the route starts at the first campsite.":null;
       if(stationSearch){
         const found=await stationSearch;
         let acc=0;const waypoints=(currentRoute?.legs||[]).map((leg:any,i:number)=>{acc+=leg.distance/1609.344;return {name:routePoints[i+1]?.name||`Stop ${i+2}`,mile:acc}});
@@ -173,10 +213,11 @@ export default function Home() {
 
   return <div className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark">↗</span><div><strong>OVERLAND PLANNER</strong><small>Trip logistics, simplified.</small></div></div><div className="top-actions">{userEmail?<><span className="user-pill">{userEmail}</span><button onClick={signOut}>Sign out</button></>:<button className="primary" onClick={()=>setAuthOpen(true)}>Sign in</button>}</div></header>
-    <div className="body"><aside className="sidebar">{["Dashboard","Trips","Campsites","Fuel","Budget","Pack List"].map(x=><button key={x} className={tab===x?"nav active":"nav"} onClick={()=>setTab(x as any)}><span>{x==="Campsites"?"⌂":x==="Fuel"?"⛽":x==="Budget"?"$":x==="Pack List"?"✓":x==="Trips"?"⌁":"▦"}</span>{x}</button>)}<div className="side-note"><b>Our lane</b><span>Your campsites. Your route. Your fuel plan.</span></div></aside>
+    <div className="body"><aside className="sidebar">{["Dashboard","Trips","Trip","Campsites","Fuel","Budget","Pack List"].map(x=><button key={x} className={tab===x?"nav active":"nav"} onClick={()=>setTab(x as any)}><span>{x==="Campsites"?"⌂":x==="Fuel"?"⛽":x==="Budget"?"$":x==="Pack List"?"✓":x==="Trips"?"⌁":x==="Trip"?"⌖":"▦"}</span>{x}</button>)}<div className="side-note"><b>Our lane</b><span>Your campsites. Your route. Your fuel plan.</span></div></aside>
     <main className="main">
       {tab==="Dashboard"&&<Dashboard trips={trips} campsites={campsites} safeRange={safeRange} fuelBudget={fuelBudget} createTrip={()=>setTab("Trips")} />}
-      {tab==="Trips"&&<TripsView trips={trips} tripName={tripName} setTripName={setTripName} start={start} setStart={setStart} createTrip={createTrip} selectedTrip={selectedTrip} setSelectedTrip={selectTrip} campsites={campsites} addStop={addStop} stops={stops} setStops={setStops} route={route} routeLoading={routeLoading} calculateRoute={calculateRoute} fuelStations={fuelStations} fuelStopPlan={fuelStopPlan} saveStops={saveStops}/>} 
+      {tab==="Trips"&&<TripsView trips={trips} tripName={tripName} setTripName={setTripName} start={start} setStart={setStart} createTrip={createTrip} selectedTrip={selectedTrip} openTrip={openTrip}/>}
+      {tab==="Trip"&&(selectedTrip?<TripPlanner key={selectedTrip.id} tripName={selectedTrip.name} startText={tripStart} setStartText={setTripStart} startPoint={tripStartPoint} setStartPoint={setTripStartPoint} commitStart={commitStart} stops={stops} setStops={setStops} campsites={campsites} route={route} setRoute={setRoute} routeKey={routeKey} setRouteKey={setRouteKey} clearFuel={clearFuel} persistStops={saveStops} calculateRoute={calculateRoute} routeLoading={routeLoading} fuelStations={fuelStations} fuelStopPlan={fuelStopPlan} setMessage={setMessage} openEditCampsite={openEdit} goTab={(t:string)=>setTab(t as any)}/>:<section className="content"><div className="page-head"><div><span className="eyebrow">TRIP</span><h1>No trip open.</h1><p>Create a trip or open a saved one to plan its route and campsites.</p></div><button className="primary" onClick={()=>setTab("Trips")}>Go to Trips</button></div></section>)}
       {tab==="Campsites"&&<section className="content"><div className="page-head"><div><span className="eyebrow">CAMPSITE LIBRARY</span><h1>Your campsites.</h1><p>Save the places you find elsewhere. Use them as primary stops or backups on future trips.</p></div><div className="page-head-actions"><button className="secondary" onClick={()=>setShowImporter(true)}>Import from Google Maps</button><button className="primary" onClick={openNew}>＋ Add campsite</button></div></div><div className="toolbar"><input placeholder="Search campsites..." value={search} onChange={e=>setSearch(e.target.value)}/><select value={areaFilter} onChange={e=>setAreaFilter(e.target.value)}>{areas.map(a=><option key={a}>{a}</option>)}</select><div className="seg"><button className={view==="list"?"selected":""} onClick={()=>setView("list")}>List</button><button className={view==="map"?"selected":""} onClick={()=>setView("map")}>Map</button></div></div>{!userEmail?<EmptyState title="Sign in to build your campsite library." action={()=>setAuthOpen(true)}/>:loadingCamps?<div className="loading">Loading campsites…</div>:view==="map"?<div className="map-card"><MapboxMap campsites={filtered} route={null} onSelect={openEdit}/></div>:<div className="table-card"><div className="table-head"><span>Campsite</span><span>Area</span><span>State / province</span><span>Type</span><span>Cost</span><span>Rating</span><span></span></div>{filtered.length?filtered.map(c=><div className="table-row" key={c.id}><div><strong>{c.favorite?"★ ":""}{c.name}</strong><small>{c.notes||"No notes yet"}</small></div><span>{c.area||"—"}</span><span>{c.state||"—"}</span><span>{c.type}</span><span>{c.cost==null?"—":c.cost===0?"Free":`$${c.cost}`}</span><span>{c.rating?"★".repeat(c.rating):"—"}</span><div className="row-actions"><button onClick={()=>addStop(c)}>＋ Trip</button><button onClick={()=>openEdit(c)}>Edit</button><button onClick={()=>deleteCampsite(c)}>Delete</button></div></div>):<div className="empty">No campsites match your filters.</div>}</div>}</section>}
       {tab==="Fuel"&&<FuelView mpg={mpg} setMpg={setMpg} tank={tank} setTank={setTank} reserve={reserve} setReserve={setReserve} priceCushion={priceCushion} setPriceCushion={setPriceCushion} mileageBuffer={mileageBuffer} setMileageBuffer={setMileageBuffer} safeRange={safeRange} fullRange={fullRange} route={route} stations={fuelStations} stopPlan={fuelStopPlan} plan={fuelPlan} selectedTrip={selectedTrip} saveSettings={saveVehicleSettings}/>} 
       {tab==="Budget"&&<BudgetView budget={budget} setBudget={setBudget} fuelBudget={fuelBudget} fuelPlan={fuelPlan}/>} 
@@ -188,15 +229,11 @@ export default function Home() {
 
 function Dashboard({trips,campsites,safeRange,fuelBudget,createTrip}:any){return <section className="content"><div className="hero"><span className="eyebrow">OVERLAND PLANNER 0.7</span><h1>Plan the trip.<br/><i>Not everything else.</i></h1><p>A focused workspace for the parts of overlanding that are hardest to keep straight: campsites, routes, fuel and budget.</p><button className="primary" onClick={createTrip}>Build a trip</button></div><div className="stat-grid"><Stat n={trips.length} label="Saved trips"/><Stat n={campsites.length} label="Saved campsites"/><Stat n={`${safeRange} mi`} label="Current safe range"/><Stat n={fuelBudget?`$${Math.round(fuelBudget).toLocaleString()}`:"—"} label="Current fuel budget"/></div><div className="three"><Card title="Campsite library" text="Keep your own list of primary and backup campsites, with coordinates ready for routing."/><Card title="Fuel planning" text="Use current EIA averages, then deliberately add a price cushion and mileage reserve so the budget is conservative."/><Card title="Simple budget" text="Fuel becomes route-driven. Camping, food, park fees and everything else stay editable."/></div></section>}
 
-function TripsView({trips,tripName,setTripName,start,setStart,createTrip,selectedTrip,setSelectedTrip,campsites,addStop,stops,setStops,route,routeLoading,calculateRoute,fuelStations,fuelStopPlan,saveStops}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">TRIPS</span><h1>Route your stops.</h1><p>Pick campsites from your library. Then let routing and fuel planning handle the logistics.</p></div></div><div className="trip-builder"><div className="form-card"><h3>New trip</h3><label>Trip name<input value={tripName} onChange={e=>setTripName(e.target.value)}/></label><label>Starting point<input value={start} onChange={e=>setStart(e.target.value)}/></label><button className="primary" onClick={createTrip}>Create trip</button></div><div className="form-card"><h3>Saved trips</h3>{trips.length?trips.map((t:Trip)=><button className={selectedTrip?.id===t.id?"trip-item selected":"trip-item"} key={t.id} onClick={()=>setSelectedTrip(t)}><strong>{t.name}</strong><small>{t.start_location||"No start"}</small></button>):<div className="empty">No saved trips yet.</div>}</div></div>{selectedTrip&&<div className="route-workspace"><div className="route-sidebar"><div className="section-title"><div><span className="eyebrow">{selectedTrip.name}</span><h2>Stops</h2></div><button onClick={saveStops}>Save</button></div>{stops.map((s:Stop,i:number)=><div className="stop-row" key={`${s.id||s.name}-${i}`}><span>{i+1}</span><div><strong>{s.name}</strong><small>{s.latitude.toFixed(4)}, {s.longitude.toFixed(4)}</small></div><button onClick={()=>setStops((p:Stop[])=>p.filter((_,idx)=>idx!==i))}>×</button></div>)}<div className="library-mini"><b>Add from library</b>{campsites.slice(0,8).map((c:Campsite)=><button key={c.id} onClick={()=>addStop(c)}>＋ {c.name}</button>)}</div><button className="primary full" disabled={routeLoading} onClick={calculateRoute}>{routeLoading?"Calculating…":"Calculate route & fuel"}</button>{fuelStopPlan&&<FuelPlanSummary plan={fuelStopPlan}/>}</div><div className="route-map"><MapboxMap campsites={campsites} route={route} stops={stops} fuelStations={fuelStations}/></div></div>}</section>}
+function TripsView({trips,tripName,setTripName,start,setStart,createTrip,selectedTrip,openTrip}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">TRIPS</span><h1>Plan a trip.</h1><p>Create a trip, then set your destinations and pick campsites from your saved map.</p></div></div><div className="trip-builder"><div className="form-card"><h3>New trip</h3><label>Trip name<input value={tripName} onChange={e=>setTripName(e.target.value)}/></label><label>Starting point<input value={start} onChange={e=>setStart(e.target.value)}/></label><button className="primary" onClick={createTrip}>Create trip</button></div><div className="form-card"><h3>Saved trips</h3>{trips.length?trips.map((t:Trip)=><button className={selectedTrip?.id===t.id?"trip-item selected":"trip-item"} key={t.id} onClick={()=>openTrip(t)}><strong>{t.name}</strong><small>{t.start_location||"No start"}</small></button>):<div className="empty">No saved trips yet.</div>}</div></div></section>}
 
 function FuelView({mpg,setMpg,tank,setTank,reserve,setReserve,priceCushion,setPriceCushion,mileageBuffer,setMileageBuffer,safeRange,fullRange,route,stations,stopPlan,plan,selectedTrip,saveSettings}:any){const miles=route?Math.round(route.distance/1609.344):0;const hours=route?Math.round(route.duration/3600*10)/10:0;return <section className="content"><div className="page-head"><div><span className="eyebrow">FUEL</span><h1>Build a conservative fuel budget.</h1><p>EIA provides the baseline. Your cushion and mileage reserve keep the trip budget from being too optimistic.</p></div></div><div className="fuel-grid"><div className="form-card"><h3>Vehicle & budget cushion</h3><label>MPG<input type="number" min="1" step="0.1" value={mpg} onChange={e=>setMpg(Number(e.target.value))}/></label><label>Tank gallons<input type="number" min="1" step="0.1" value={tank} onChange={e=>setTank(Number(e.target.value))}/></label><label>Tank reserve %<input type="number" min="0" max="50" step="1" value={reserve} onChange={e=>setReserve(Number(e.target.value))}/></label><label>Fuel price cushion / gallon<input type="number" min="0" step="0.05" value={priceCushion} onChange={e=>setPriceCushion(Number(e.target.value))}/></label><label>Mileage reserve %<input type="number" min="0" max="50" step="1" value={mileageBuffer} onChange={e=>setMileageBuffer(Number(e.target.value))}/></label><div className="big-number">{safeRange}<small>practical miles before reserve</small></div><span className="muted">{fullRange} miles at a full tank</span>{selectedTrip&&<button className="secondary full" onClick={saveSettings}>Save vehicle settings to this trip</button>}</div><div className="form-card"><h3>Current route</h3>{route?<><div className="metric-line"><span>Distance</span><b>{miles.toLocaleString()} mi</b></div><div className="metric-line"><span>Drive time</span><b>{hours} hr</b></div>{plan?.warning&&<div className="warning-box">{plan.warning}</div>}{plan?.estimatedCost!=null?<><div className="fuel-budget-number">${Math.round(plan.estimatedCost).toLocaleString()}<small>recommended fuel budget</small></div><div className="metric-line"><span>Route miles + reserve</span><b>{Math.round(plan.bufferedMiles).toLocaleString()} mi</b></div><div className="metric-line"><span>Planning gallons</span><b>{plan.gallons.toFixed(1)} gal</b></div><div className="metric-line"><span>Weighted EIA baseline</span><b>${plan.baselinePrice?.toFixed(2)}/gal</b></div><div className="metric-line"><span>Weighted planning price</span><b>${plan.planningPrice?.toFixed(2)}/gal</b></div><p className="muted">Planning price = EIA baseline + ${priceCushion.toFixed(2)}/gal. Mileage reserve is {mileageBuffer}%.</p></>:<div className="empty">Calculate the route again to generate the fuel budget.</div>}</>:<div className="empty">Calculate a route from the Trips page first.</div>}</div></div>{plan?.segments?.length>0&&<div className="fuel-segments"><div className="section-title"><div><span className="eyebrow">ROUTE LEGS</span><h2>Fuel cost by leg</h2></div><span className="muted">EIA weekly retail averages{plan.priceDate?` · week ${plan.priceDate}`:""}</span></div>{plan.segments.map((s:FuelSegment,i:number)=><div className="fuel-segment" key={`${s.from}-${s.to}-${i}`}><div><strong>{s.from} → {s.to}</strong><small>{s.state||"State unavailable"} · {Math.round(s.miles).toLocaleString()} route mi · {s.source||"No EIA price"}</small></div><div className="fuel-segment-right"><span>{s.price==null?"—":`$${s.price.toFixed(2)}/gal`}</span><b>{s.cost==null?"—":`$${Math.round(s.cost).toLocaleString()}`}</b></div></div>)}</div>}<FuelStopsCard stations={stations} stopPlan={stopPlan} route={route}/></section>}
 
 const mi=(n:number)=>Math.round(n).toLocaleString();
-function FuelPlanSummary({plan}:{plan:FuelStopPlan}){
-  const bad=!plan.feasible;
-  return <div className={bad?"plan-box plan-bad":"plan-box plan-ok"}><b>{plan.problem?"Fuel plan needs attention":bad?"Fuel gap on this route":`Fuel plan OK · ${plan.stops.length} fuel stop${plan.stops.length===1?"":"s"}`}</b><span>{plan.problem||(bad?"See the Fuel tab for where and how much extra fuel is needed.":`Arrive everywhere with ${mi(plan.range.arrivalFloor)}+ mi of range.`)}</span></div>
-}
 function FuelStopsCard({stations,stopPlan,route}:{stations:FuelStation[];stopPlan:FuelStopPlan|null;route:any}){
   return <div className="fuel-stations-card"><div className="section-title"><div><span className="eyebrow">FUEL STOPS</span><h2>Range-safe fuel plan</h2></div><span className="muted">Never arrive with less than {MIN_ARRIVAL_RANGE_MILES} mi of range</span></div>
   {!route?<div className="empty">Calculate a route from the Trips page first.</div>:!stopPlan?<div className="empty">No fuel plan yet. Calculate the route again.</div>:<>
