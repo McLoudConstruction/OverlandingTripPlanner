@@ -98,32 +98,52 @@ export function extractPlaceCoordinates(name: string, url: string): LatLon | nul
   return null;
 }
 
+// Province/territory codes, used only when Mapbox returns a code but no name.
+const CA_NAME_BY_CODE: Record<string, string> = {
+  AB:"Alberta", BC:"British Columbia", MB:"Manitoba", NB:"New Brunswick", NL:"Newfoundland and Labrador",
+  NS:"Nova Scotia", NT:"Northwest Territories", NU:"Nunavut", ON:"Ontario", PE:"Prince Edward Island",
+  QC:"Quebec", SK:"Saskatchewan", YT:"Yukon"
+};
+
+export const CA_REGIONS = Object.values(CA_NAME_BY_CODE).sort();
+
+export type RegionInfo = { region: string; country: string; countryCode: string };
+
 /**
- * Full US state name from a Mapbox v6 (Geocoding or Search Box) feature.
- * Returns "" when the feature isn't in a US state, rather than guessing.
+ * First-level administrative region (US state, Canadian province or
+ * territory, or the equivalent anywhere else) plus the country, from a
+ * Mapbox v6 Geocoding or Search Box feature. Empty strings when unknown.
  */
-export function stateFromFeature(feature: any): string {
-  if (!feature) return "";
+export function regionFromFeature(feature: any): RegionInfo {
+  const none = { region: "", country: "", countryCode: "" };
+  if (!feature) return none;
   const props = feature.properties || {};
   const ctx = props.context || {};
   const countryCode = String(ctx.country?.country_code || props.country_code || "").toUpperCase();
-  if (countryCode && countryCode !== "US") return "";
+  const country = String(ctx.country?.name || (props.feature_type === "country" ? props.name : "") || "");
 
-  const byName = (n: unknown) => (typeof n === "string" && STATE_NAMES[n] ? n : "");
-  const byCode = (c: unknown) => {
+  const clean = (n: unknown) => (typeof n === "string" ? n.trim() : "");
+  const fromCode = (c: unknown) => {
     const code = String(c || "").toUpperCase().split("-").pop() || "";
-    return NAME_BY_CODE[code] || "";
+    if (countryCode === "CA") return CA_NAME_BY_CODE[code] || "";
+    if (countryCode === "US" || !countryCode) return NAME_BY_CODE[code] || "";
+    return "";
   };
 
-  // A region feature is the state itself; otherwise the state lives in context.region.
+  // A region feature is the region itself; otherwise it lives in context.region.
+  let region = "";
   if (props.feature_type === "region") {
-    const own = byName(props.name_preferred) || byName(props.name) || byCode(props.region_code_full) || byCode(props.region_code);
-    if (own) return own;
+    region = clean(props.name_preferred) || clean(props.name) || fromCode(props.region_code_full) || fromCode(props.region_code);
   }
-  return (
-    byName(ctx.region?.name) ||
-    byCode(ctx.region?.region_code_full) ||
-    byCode(ctx.region?.region_code) ||
-    ""
-  );
+  if (!region) {
+    region = clean(ctx.region?.name) || fromCode(ctx.region?.region_code_full) || fromCode(ctx.region?.region_code);
+  }
+  return { region, country, countryCode };
+}
+
+/** US state abbreviation (EIA fuel prices are US-only); "" for anywhere else. */
+export function usStateCode(feature: any): string {
+  const { region, countryCode } = regionFromFeature(feature);
+  if (countryCode && countryCode !== "US") return "";
+  return STATE_NAMES[region] || "";
 }
