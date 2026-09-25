@@ -22,6 +22,7 @@ type ImportCandidate = {
   notes: string;
   selected: boolean;
   status: "ready" | "needs-location" | "duplicate";
+  duplicateOf: string;
 };
 
 type Trip = {
@@ -204,8 +205,8 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
         const name=(r.title||r.name||r.saved_place||r.place||r.label||`Saved place ${i+1}`).trim();
         const url=(r.url||r.link||r.google_maps_url||r.google_maps_link||"").trim();
         const note=(r.note||r.notes||r.description||"").trim();
-        const coords=extractPlaceCoordinates(name,url); const dup=isDuplicate(name,coords,existing);
-        return {key:`${i}-${name}-${url}`,name,area:"",state:"",type:"Other",latitude:coords?.latitude??null,longitude:coords?.longitude??null,source_url:url,notes:note,selected:!dup,status:(dup?"duplicate":coords?"ready":"needs-location") as ImportCandidate["status"]};
+        const coords=extractPlaceCoordinates(name,url);
+        return {key:`${i}-${name}-${url}`,name,area:"",state:"",type:"Other",latitude:coords?.latitude??null,longitude:coords?.longitude??null,source_url:url,notes:note,selected:true,status:(coords?"ready":"needs-location") as ImportCandidate["status"],duplicateOf:""};
       });
       let next=candidates;
       if(token){
@@ -216,6 +217,8 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
         next=await geocodeMissing(next,token);
         next=await reverseGeocodeStates(next,token);
       }
+      // Duplicates are checked last, once every row has its final coordinates.
+      next=markDuplicates(next,existing);
       setRows(next);
     }catch(e:any){setError(e?.message||"Could not read that CSV.")}
     finally{setBusy(false)}
@@ -272,9 +275,17 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
     return output;
   }
 
-  const update=(key:string,patch:Partial<ImportCandidate>)=>setRows(prev=>prev.map(r=>r.key===key?{...r,...patch}:r));
+  const update=(key:string,patch:Partial<ImportCandidate>)=>setRows(prev=>{
+    const next=prev.map(r=>r.key===key?{...r,...patch}:r);
+    if(!("name" in patch||"latitude" in patch||"longitude" in patch))return next;
+    const i=next.findIndex(r=>r.key===key);
+    // Label only; the checkbox stays wherever the user put it.
+    next[i]={...next[i],duplicateOf:findDuplicate(next[i],existing,next.slice(0,i))};
+    return next;
+  });
   const remove=(key:string)=>setRows(prev=>prev.filter(r=>r.key!==key));
   const selectedCount=rows.filter(r=>r.selected&&r.latitude!=null&&r.longitude!=null).length;
+  const duplicates=rows.filter(r=>r.duplicateOf).length;
   const unresolved=rows.filter(r=>r.latitude==null||r.longitude==null).length;
 
   return <div className="modal-backdrop"><div className="modal importer-modal">
@@ -282,14 +293,14 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
     {!rows.length&&<div className="import-drop"><div className="import-icon">↓</div><h3>Upload your Google Maps CSV</h3><p>Google Takeout → Saved → download the CSV files, then choose one or several here.</p><label className="upload-button">Choose CSV files<input type="file" multiple accept=".csv,text/csv" onChange={e=>{const files=Array.from(e.target.files||[]) as File[];if(files.length)handleFiles(files)}}/></label>{fileName&&<span className="muted">{fileName}</span>}{error&&<div className="warning-box">{error}</div>}</div>}
     {busy&&<div className="loading">Reading your saved places and locating anything that needs coordinates…</div>}
     {rows.length>0&&!busy&&<>
-      <div className="import-summary"><div><strong>{rows.length}</strong><span>saved places found</span></div><div><strong>{selectedCount}</strong><span>ready to import</span></div><div><strong>{unresolved}</strong><span>need a location</span></div></div>
+      <div className="import-summary"><div><strong>{rows.length}</strong><span>saved places found</span></div><div><strong>{selectedCount}</strong><span>ready to import</span></div><div><strong>{duplicates}</strong><span>possible duplicates</span></div><div><strong>{unresolved}</strong><span>need a location</span></div></div>
       <div className="import-note"><strong>Review before importing.</strong> State, province or territory is calculated from the campsite coordinates (worldwide). Area is intentionally left blank for you to fill in later. Places that aren't campsites can be removed with <b>Skip</b>. You can also edit the name, area, state, type, or coordinates before importing.</div>
       <datalist id="region-options">{[...Object.keys(STATE_NAMES),...CA_REGIONS].map(n=><option key={n} value={n}/>)}</datalist>
       <div className="import-list">{rows.map(r=><div className={`import-row ${r.selected?"":"skipped"}`} key={r.key}>
         <div className="import-check"><input type="checkbox" checked={r.selected} onChange={e=>update(r.key,{selected:e.target.checked})}/></div>
         <div className="import-fields">
           <div className="import-grid"><label>Name<input value={r.name} onChange={e=>update(r.key,{name:e.target.value})}/></label><label>Area / region<input value={r.area} onChange={e=>update(r.key,{area:e.target.value})}/></label><label>State / province<input list="region-options" value={r.state} placeholder="Auto from coordinates" onChange={e=>update(r.key,{state:e.target.value})}/></label><label>Type<select value={r.type} onChange={e=>update(r.key,{type:e.target.value})}><option>Other</option><option>Dispersed</option><option>Developed</option><option>Forest campground</option><option>Private campground</option></select></label><label>Latitude<input type="number" step="any" value={r.latitude??""} onChange={e=>update(r.key,{latitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label><label>Longitude<input type="number" step="any" value={r.longitude??""} onChange={e=>update(r.key,{longitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label></div>
-          <div className="import-meta"><span className={r.latitude!=null&&r.longitude!=null?"ready-text":"needs-text"}>{r.latitude!=null&&r.longitude!=null?"Location ready":"Location needed"}</span>{r.source_url&&<a href={r.source_url} target="_blank" rel="noreferrer">Open Google Maps ↗</a>}</div>
+          <div className="import-meta"><span className={r.latitude!=null&&r.longitude!=null?"ready-text":"needs-text"}>{r.latitude!=null&&r.longitude!=null?"Location ready":"Location needed"}</span>{r.duplicateOf&&<span className="dup-text">Possible duplicate of {r.duplicateOf}</span>}{r.source_url&&<a href={r.source_url} target="_blank" rel="noreferrer">Open Google Maps ↗</a>}</div>
         </div>
         <button className="skip-button" onClick={()=>remove(r.key)}>Skip</button>
       </div>)}</div>
@@ -314,10 +325,37 @@ function parseCsv(text:string):Record<string,string>[]{
   return rows.slice(1).map(values=>Object.fromEntries(headers.map((h,i)=>[h,(values[i]??"").trim()])));
 }
 
-function isDuplicate(name:string,coords:{latitude:number;longitude:number}|null,existing:Campsite[]){
-  const normalized=name.trim().toLowerCase();
-  return existing.some(c=>normalized&&c.name.trim().toLowerCase()===normalized||(coords&&haversineMiles([coords.longitude,coords.latitude],[c.longitude,c.latitude])<0.05));
+const DUP_MILES=0.05; // about 80 m
+
+/**
+ * Describes what a row duplicates, or "" if nothing. Checks the saved library
+ * (same name or same spot) and rows earlier in this import (same spot, or the
+ * same name when either row has no coordinates), so the first copy is kept.
+ */
+function findDuplicate(row:ImportCandidate,existing:Campsite[],earlier:ImportCandidate[]):string{
+  const name=row.name.trim().toLowerCase();
+  const hasCoords=row.latitude!=null&&row.longitude!=null&&Number.isFinite(row.latitude)&&Number.isFinite(row.longitude);
+  const here:[number,number]|null=hasCoords?[row.longitude as number,row.latitude as number]:null;
+  for(const c of existing){
+    if(here&&haversineMiles(here,[c.longitude,c.latitude])<DUP_MILES)return `${c.name} (already in your library)`;
+    if(name&&c.name.trim().toLowerCase()===name)return `${c.name} (same name in your library)`;
+  }
+  for(const o of earlier){
+    if(o.key===row.key)continue;
+    const oHas=o.latitude!=null&&o.longitude!=null;
+    if(here&&oHas&&haversineMiles(here,[o.longitude as number,o.latitude as number])<DUP_MILES)return `${o.name} (earlier in this import)`;
+    if(name&&(!here||!oHas)&&o.name.trim().toLowerCase()===name)return `${o.name} (earlier in this import)`;
+  }
+  return "";
 }
+
+function markDuplicates(rows:ImportCandidate[],existing:Campsite[]):ImportCandidate[]{
+  return rows.map((r,i)=>{
+    const duplicateOf=findDuplicate(r,existing,rows.slice(0,i));
+    return duplicateOf?{...r,duplicateOf,selected:false,status:"duplicate" as const}:{...r,duplicateOf:""};
+  });
+}
+
 
 function CampForm({initial,onClose,onSave,onDelete}:any){const blank={name:"",area:"",state:"",type:"Dispersed",latitude:"",longitude:"",cost:"",reservation:"",rating:"",favorite:false,notes:"",source:"",source_url:"",last_verified_at:""};const [f,setF]=useState<any>(initial?{...initial,latitude:String(initial.latitude),longitude:String(initial.longitude),cost:initial.cost==null?"":String(initial.cost),rating:initial.rating==null?"":String(initial.rating)}:blank);const set=(k:string,v:any)=>setF((p:any)=>({...p,[k]:v}));return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><span className="eyebrow">CAMPSITE</span><h2>{initial?"Edit campsite":"Add campsite"}</h2></div><button onClick={onClose}>×</button></div><div className="form-grid">{[["name","Name"],["area","Area / region"],["state","State / province"],["latitude","Latitude"],["longitude","Longitude"],["cost","Cost / night"],["rating","Your rating 1–5"],["reservation","Reservation / access"],["source","Source"]].map(([k,l])=><label key={k}>{l}<input value={f[k]||""} readOnly={k==="state"} onChange={e=>set(k,e.target.value)} /></label>)}</div><label>Type<select value={f.type} onChange={e=>set("type",e.target.value)}><option>Dispersed</option><option>Developed</option><option>Forest campground</option><option>Private campground</option><option>Other</option></select></label><label>Notes<textarea value={f.notes} onChange={e=>set("notes",e.target.value)} /></label><label>Source URL<input value={f.source_url} onChange={e=>set("source_url",e.target.value)} /></label><label>Last verified<input type="date" value={f.last_verified_at||""} onChange={e=>set("last_verified_at",e.target.value)}/></label><label className="check"><input type="checkbox" checked={f.favorite} onChange={e=>set("favorite",e.target.checked)}/><span>Favorite / preferred campsite</span></label><div className="modal-actions">{initial&&<button className="danger-button" onClick={()=>{onDelete(initial);onClose()}}>Delete campsite</button>}<button onClick={onClose}>Cancel</button><button className="primary" onClick={()=>onSave({...f,latitude:Number(f.latitude),longitude:Number(f.longitude),cost:f.cost===""?null:Number(f.cost),rating:f.rating===""?null:Number(f.rating)})}>Save campsite</button></div></div></div>}
 function AuthModal({email,password,setEmail,setPassword,busy,onClose,onSignIn,onSignUp}:any){return <div className="modal-backdrop"><div className="modal auth"><div className="modal-head"><div><span className="eyebrow">ACCOUNT</span><h2>Save your planner.</h2></div><button onClick={onClose}>×</button></div><label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)}/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)}/></label><div className="modal-actions"><button disabled={busy} onClick={onSignIn}>Sign in</button><button className="primary" disabled={busy} onClick={onSignUp}>Create account</button></div></div></div>}
