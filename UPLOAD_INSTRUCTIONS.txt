@@ -1,0 +1,14 @@
+Range-aware fuel stop planner update
+
+Files (same folder layout as the repo; upload over the existing ones):
+  app/page.tsx      (modified)
+  app/map.tsx       (modified)
+  app/globals.css   (modified)
+  lib/fuel.ts       (NEW)
+
+GitHub web upload: open the repo > Add file > Upload files, drag the "app" and
+"lib" folders from this zip (not the zip itself), and commit. Vercel redeploys
+automatically. No new dependencies or environment variables are needed.
+
+fuel-range-planner.patch is the same change as a git patch, for
+"git apply fuel-range-planner.patch" if you prefer the command line.

@@ -1,0 +1,550 @@
+diff --git a/app/globals.css b/app/globals.css
+index d5d4cbd..80cf23a 100644
+--- a/app/globals.css
++++ b/app/globals.css
+@@ -3,3 +3,7 @@
+ .page-head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.importer-modal{width:min(1050px,100%)}.importer-modal .modal-head p{max-width:680px;margin:8px 0 0}.import-drop{border:1px dashed #c8c4bb;background:#fff;padding:48px 24px;text-align:center;border-radius:10px}.import-drop h3{margin:10px 0 6px}.import-drop p{color:#777;font-size:12px;line-height:1.5;margin:0 auto 18px}.import-icon{width:44px;height:44px;border-radius:50%;background:#ebe9e3;display:grid;place-items:center;margin:auto;font-size:22px}.upload-button{display:inline-block!important;background:#171714;color:#fff;border-radius:8px;padding:11px 16px!important;font-weight:700!important;cursor:pointer!important;margin:0!important}.upload-button input{display:none!important}.import-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}.import-summary>div{background:#fff;border:1px solid #dedbd4;border-radius:8px;padding:12px}.import-summary strong,.import-summary span{display:block}.import-summary strong{font-size:22px}.import-summary span{font-size:10px;color:#777;margin-top:2px}.import-note{background:#f0eee8;border-radius:8px;padding:12px 14px;color:#666;font-size:11px;line-height:1.5;margin-bottom:12px}.import-list{max-height:48vh;overflow:auto;border:1px solid #dedbd4;border-radius:9px;background:#fff}.import-row{display:grid;grid-template-columns:28px 1fr auto;gap:10px;padding:13px;border-bottom:1px solid #eee;align-items:start}.import-row:last-child{border-bottom:0}.import-row.skipped{opacity:.52}.import-check input{width:16px;height:16px;margin-top:9px}.import-fields{min-width:0}.import-grid{display:grid;grid-template-columns:1.7fr 1.15fr .95fr 1fr 1fr 1fr;gap:8px}.import-grid label{font-size:9px!important;margin:0!important;color:#777!important}.import-grid input,.import-grid select{margin-top:4px!important;padding:8px!important;font-size:11px!important}.import-meta{display:flex;justify-content:space-between;gap:10px;margin-top:7px;font-size:10px}.import-meta a{color:#555}.ready-text{color:#486847}.needs-text{color:#9a6b24}
+ .dup-text{color:#8a3535;font-weight:700}.skip-button{border:1px solid #d5d2ca;background:#fff;border-radius:6px;padding:7px 9px;font-size:10px}.secondary:disabled,.primary:disabled{opacity:.45;cursor:not-allowed}@media(max-width:800px){.import-grid{grid-template-columns:1fr 1fr}.import-row{grid-template-columns:28px 1fr}.skip-button{grid-column:2;justify-self:start}.import-summary{grid-template-columns:1fr}.page-head-actions{width:100%}}
+ .danger-button{border:1px solid #d8b5b5!important;background:#fff!important;color:#8a3535!important;border-radius:6px;padding:7px 9px;font-size:11px;margin-right:auto}.danger-button:hover{background:#fbf1f1!important}
++
++.plan-box{display:flex;flex-direction:column;gap:3px;margin:12px 0;padding:10px 12px;border-radius:8px;font-size:12px;line-height:1.4}.plan-ok{background:#eef8f0;border:1px solid #b9dcc1;color:#1f5130}.plan-bad{background:#fdeeee;border:1px solid #e8b4b4;color:#7a1f1f}
++.arrival-row{display:flex;justify-content:space-between;gap:16px;padding:10px 0;border-top:1px solid #eee}.arrival-row small{display:block;color:#777}.arrival-row .ok{color:#1f5130;font-weight:700}.arrival-row .bad{color:#b42318;font-weight:700}
++.fuel-stations-card h3{margin:18px 0 4px;font-size:14px}.fuel-stations-card details{margin-top:16px}.fuel-stations-card summary{cursor:pointer;font-size:13px;font-weight:700}
+diff --git a/app/map.tsx b/app/map.tsx
+index 6b760f3..1f37c16 100644
+--- a/app/map.tsx
++++ b/app/map.tsx
+@@ -14,8 +14,8 @@ export default function Map({campsites=[],route=null,stops=[],fuelStations=[],on
+  map.on("load",()=>{campsites.forEach((c:any)=>{const el=document.createElement("button");el.className="map-pin";el.textContent="⌂";el.title=c.name;el.onclick=()=>onSelect?.(c);new mapboxgl.Marker(el).setLngLat([c.longitude,c.latitude]).setPopup(new mapboxgl.Popup({offset:18}).setHTML(`<strong>${escapeHtml(c.name)}</strong><br/><span>${escapeHtml(c.area||"")}</span>`)).addTo(map)});
+  if(route?.geometry){map.addSource("route",{type:"geojson",data:{type:"Feature",geometry:route.geometry,properties:{}}});map.addLayer({id:"route",type:"line",source:"route",paint:{"line-color":"#111827","line-width":4,"line-opacity":0.8}});}
+  stops.forEach((s:any,i:number)=>new mapboxgl.Marker({color:"#111827"}).setLngLat([s.longitude,s.latitude]).setPopup(new mapboxgl.Popup().setText(`${i+1}. ${s.name}`)).addTo(map));
+- fuelStations.slice(0,12).forEach((s:any)=>{const c=s.geometry?.coordinates;if(c)new mapboxgl.Marker({color:"#d97706"}).setLngLat(c).setPopup(new mapboxgl.Popup().setText(s.properties?.name||s.text||"Gas station")).addTo(map)});
+- const points=[...campsites.map((c:any)=>[c.longitude,c.latitude]),...stops.map((s:any)=>[s.longitude,s.latitude]),...fuelStations.map((s:any)=>s.geometry?.coordinates).filter(Boolean)];if(points.length&&(route?.geometry||stops.length)){const b=new mapboxgl.LngLatBounds();points.forEach((p:any)=>b.extend(p as [number,number]));map.fitBounds(b,{padding:60,maxZoom:11});}
++ fuelStations.forEach((s:any)=>{if(typeof s.lng!=="number"||typeof s.lat!=="number")return;new mapboxgl.Marker({color:s.planned?"#16a34a":"#d97706",scale:s.planned?1:0.6}).setLngLat([s.lng,s.lat]).setPopup(new mapboxgl.Popup().setText(`${s.planned?"Planned fuel stop: ":""}${s.name||"Gas station"}`)).addTo(map)});
++ const points=[...campsites.map((c:any)=>[c.longitude,c.latitude]),...stops.map((s:any)=>[s.longitude,s.latitude]),...fuelStations.filter((s:any)=>s.planned).map((s:any)=>[s.lng,s.lat])];if(points.length&&(route?.geometry||stops.length)){const b=new mapboxgl.LngLatBounds();points.forEach((p:any)=>b.extend(p as [number,number]));map.fitBounds(b,{padding:60,maxZoom:11});}
+  });return()=>{map.remove();mapRef.current=null}},[campsites,route,stops,fuelStations,onSelect]);
+  return <div className="map-wrap">{!process.env.NEXT_PUBLIC_MAPBOX_TOKEN?<div className="map-placeholder"><strong>Mapbox is not connected.</strong><span>Add NEXT_PUBLIC_MAPBOX_TOKEN to Vercel, then redeploy.</span></div>:<div ref={ref} className="map-canvas"/>}</div>
+ }
+diff --git a/app/page.tsx b/app/page.tsx
+index 8aaf982..fda691b 100644
+--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
+ import { createClient } from "@/lib/supabase/client";
+ import MapboxMap from "./map";
+ import { STATE_NAMES, CA_REGIONS, extractPlaceCoordinates, regionFromFeature, usStateCode } from "@/lib/geo";
++import { MIN_ARRIVAL_RANGE_MILES, computeRange, findStationsAlongRoute, planFuelStops, type FuelStation, type FuelStopPlan } from "@/lib/fuel";
+ 
+ type Campsite = {
+   id: string; name: string; area: string; state: string; type: string; latitude: number; longitude: number;
+@@ -58,17 +59,17 @@ export default function Home() {
+   const [showCampForm,setShowCampForm]=useState(false); const [showImporter,setShowImporter]=useState(false); const [editing,setEditing]=useState<Campsite|null>(null); const [search,setSearch]=useState(""); const [areaFilter,setAreaFilter]=useState("All");
+   const [trips,setTrips]=useState<Trip[]>([]); const [tripName,setTripName]=useState("Yellowstone Adventure"); const [start,setStart]=useState("Kansas City, MO"); const [selectedTrip,setSelectedTrip]=useState<Trip|null>(null);
+   const [mpg,setMpg]=useState(15); const [tank,setTank]=useState(36); const [reserve,setReserve]=useState(15); const [priceCushion,setPriceCushion]=useState(0.30); const [mileageBuffer,setMileageBuffer]=useState(10);
+-  const [stops,setStops]=useState<Stop[]>([]); const [routeLoading,setRouteLoading]=useState(false); const [route,setRoute]=useState<any>(null); const [fuelStations,setFuelStations]=useState<any[]>([]); const [fuelPlan,setFuelPlan]=useState<FuelPlan|null>(null);
++  const [stops,setStops]=useState<Stop[]>([]); const [routeLoading,setRouteLoading]=useState(false); const [route,setRoute]=useState<any>(null); const [fuelStations,setFuelStations]=useState<FuelStation[]>([]); const [fuelStopPlan,setFuelStopPlan]=useState<FuelStopPlan|null>(null); const [fuelPlan,setFuelPlan]=useState<FuelPlan|null>(null);
+   const [budget,setBudget]=useState({camp:300,food:500,fees:100,other:200});
+   const [pack,setPack]=useState(["Recovery boards","Air compressor","First aid kit","Headlamps","Water storage","Camp stove","Cooler","Tool kit"]);
+   const [newPack,setNewPack]=useState("");
+ 
+   useEffect(()=>{ const sb=createClient(); let mounted=true; sb.auth.getUser().then(({data})=>{if(mounted)setUserEmail(data.user?.email||"")}); const {data}=sb.auth.onAuthStateChange((_e,s)=>mounted&&setUserEmail(s?.user?.email||"")); return()=>{mounted=false;data.subscription.unsubscribe()}; },[]);
+-  useEffect(()=>{ if(userEmail) { loadCampsites(); loadTrips(); } else { setCampsites([]); setTrips([]); setSelectedTrip(null); setStops([]); setRoute(null); setFuelPlan(null); } },[userEmail]);
++  useEffect(()=>{ if(userEmail) { loadCampsites(); loadTrips(); } else { setCampsites([]); setTrips([]); setSelectedTrip(null); setStops([]); setRoute(null); setFuelPlan(null); setFuelStations([]); setFuelStopPlan(null); } },[userEmail]);
+ 
+   async function loadCampsites(){setLoadingCamps(true); const sb=createClient(); const {data,error}=await sb.from("campsites").select("*").order("name"); if(error){setMessage(error.message)} else setCampsites(data||[]); setLoadingCamps(false)}
+   async function loadTrips(){const sb=createClient(); const {data,error}=await sb.from("trips").select("id,name,start_location,destinations,mpg,tank_gallons,fuel_reserve_percent,fuel_price_cushion,fuel_mileage_buffer,created_at").order("created_at",{ascending:false}); if(error)setMessage(error.message); setTrips(data||[])}
+-  async function selectTrip(t:Trip){setSelectedTrip(t);setMpg(t.mpg||15);setTank(t.tank_gallons||36);setReserve(t.fuel_reserve_percent??15);setPriceCushion(t.fuel_price_cushion??0.30);setMileageBuffer(t.fuel_mileage_buffer??10);setRoute(null);setFuelPlan(null);const {data,error}=await createClient().from("trip_stops").select("id,name,latitude,longitude,campsite_id,stop_order,notes").eq("trip_id",t.id).order("stop_order");if(error)setMessage(error.message);setStops(data||[])}
++  async function selectTrip(t:Trip){setSelectedTrip(t);setMpg(t.mpg||15);setTank(t.tank_gallons||36);setReserve(t.fuel_reserve_percent??15);setPriceCushion(t.fuel_price_cushion??0.30);setMileageBuffer(t.fuel_mileage_buffer??10);setRoute(null);setFuelPlan(null);setFuelStations([]);setFuelStopPlan(null);const {data,error}=await createClient().from("trip_stops").select("id,name,latitude,longitude,campsite_id,stop_order,notes").eq("trip_id",t.id).order("stop_order");if(error)setMessage(error.message);setStops(data||[])}
+   async function auth(mode:"signin"|"signup"){setAuthBusy(true);setMessage("");const sb=createClient();const fn=mode==="signin"?sb.auth.signInWithPassword({email:authEmail,password:authPassword}):sb.auth.signUp({email:authEmail,password:authPassword});const {error}=await fn;if(error)setMessage(error.message);else {setMessage(mode==="signup"?"Account created. Check your email if confirmation is required.":"Signed in.");setAuthOpen(false)}setAuthBusy(false)}
+   async function signOut(){await createClient().auth.signOut();setMessage("Signed out.")}
+ 
+@@ -140,7 +141,9 @@ export default function Home() {
+       if(!res.ok||data.code!=="Ok")throw new Error(data.message||"Mapbox routing failed.");
+       const currentRoute=data.routes?.[0];setRoute(currentRoute||null);
+       const geometry=currentRoute?.geometry;
+-      if(geometry){const encoded=encodePolyline6(geometry.coordinates);const searchUrl=`https://api.mapbox.com/search/searchbox/v1/category/gas_station?route=${encodeURIComponent(encoded)}&route_geometry=polyline6&sar_type=isochrone&time_deviation=15&limit=25&access_token=${token}`;try{const fr=await fetch(searchUrl);const fd=await fr.json();setFuelStations(addRouteMiles(fd.features||[],geometry))}catch{setFuelStations([])}}
++      const vehicle={mpg,tankGallons:tank,reservePercent:reserve,mileageBufferPercent:mileageBuffer};
++      // Station search runs alongside the state lookup and EIA price fetch below.
++      const stationSearch=geometry?findStationsAlongRoute(geometry,currentRoute.distance,token,vehicle).catch((e:any)=>({stations:[] as FuelStation[],failedWindows:[{fromMile:0,toMile:currentRoute.distance/1609.344,error:e?.message||"search failed"}],windowCount:0})):null;
+       const states=await getStopStates(routePoints as Stop[],token);
+       const stateList=[...new Set(states.filter(Boolean))];
+       const priceResponse=stateList.length?await fetch(`/api/fuel-prices?states=${stateList.join(",")}`):null;
+@@ -151,6 +154,13 @@ export default function Home() {
+       });
+       const valid=segments.filter(s=>s.cost!=null);const bufferedMiles=segments.reduce((a,s)=>a+s.miles,0)*(1+mileageBuffer/100);const gallons=segments.reduce((a,s)=>a+s.gallons,0);const estimatedCost=valid.length===segments.length?segments.reduce((a,s)=>a+(s.cost||0),0):null;const baselinePrice=gallons?segments.reduce((a,s)=>a+(s.price||0)*s.gallons,0)/gallons:null;const planningPrice=gallons?segments.reduce((a,s)=>a+(s.planningPrice||0)*s.gallons,0)/gallons:null;
+       const warning=priceResponse&&!priceResponse.ok?"EIA pricing is not available yet. Add EIA_API_KEY in Vercel to calculate the fuel budget.":estimatedCost==null?"One or more route segments is missing a fuel price.":start.trim()&&!startPoint?"Starting point could not be geocoded, so the route starts at the first campsite.":null;
++      if(stationSearch){
++        const found=await stationSearch;
++        let acc=0;const waypoints=(currentRoute?.legs||[]).map((leg:any,i:number)=>{acc+=leg.distance/1609.344;return {name:routePoints[i+1]?.name||`Stop ${i+2}`,mile:acc}});
++        const stopPlan=planFuelStops(found.stations,waypoints,currentRoute.distance/1609.344,vehicle,found.failedWindows);
++        const plannedIds=new Set(stopPlan.stops.map(f=>f.station.id));
++        setFuelStations(found.stations.map(st=>({...st,planned:plannedIds.has(st.id)})));setFuelStopPlan(stopPlan);
++      } else {setFuelStations([]);setFuelStopPlan(null)}
+       setFuelPlan({routeMiles:currentRoute?.distance/1609.344||0,bufferedMiles,gallons,baselinePrice,planningPrice,estimatedCost,segments,states:stateList,priceDate:segments.find(s=>s.period)?.period||null,warning});
+       await saveStops();
+       if(selectedTrip) await saveVehicleSettings();
+@@ -166,9 +176,9 @@ export default function Home() {
+     <div className="body"><aside className="sidebar">{["Dashboard","Trips","Campsites","Fuel","Budget","Pack List"].map(x=><button key={x} className={tab===x?"nav active":"nav"} onClick={()=>setTab(x as any)}><span>{x==="Campsites"?"⌂":x==="Fuel"?"⛽":x==="Budget"?"$":x==="Pack List"?"✓":x==="Trips"?"⌁":"▦"}</span>{x}</button>)}<div className="side-note"><b>Our lane</b><span>Your campsites. Your route. Your fuel plan.</span></div></aside>
+     <main className="main">
+       {tab==="Dashboard"&&<Dashboard trips={trips} campsites={campsites} safeRange={safeRange} fuelBudget={fuelBudget} createTrip={()=>setTab("Trips")} />}
+-      {tab==="Trips"&&<TripsView trips={trips} tripName={tripName} setTripName={setTripName} start={start} setStart={setStart} createTrip={createTrip} selectedTrip={selectedTrip} setSelectedTrip={selectTrip} campsites={campsites} addStop={addStop} stops={stops} setStops={setStops} route={route} routeLoading={routeLoading} calculateRoute={calculateRoute} fuelStations={fuelStations} saveStops={saveStops}/>} 
++      {tab==="Trips"&&<TripsView trips={trips} tripName={tripName} setTripName={setTripName} start={start} setStart={setStart} createTrip={createTrip} selectedTrip={selectedTrip} setSelectedTrip={selectTrip} campsites={campsites} addStop={addStop} stops={stops} setStops={setStops} route={route} routeLoading={routeLoading} calculateRoute={calculateRoute} fuelStations={fuelStations} fuelStopPlan={fuelStopPlan} saveStops={saveStops}/>} 
+       {tab==="Campsites"&&<section className="content"><div className="page-head"><div><span className="eyebrow">CAMPSITE LIBRARY</span><h1>Your campsites.</h1><p>Save the places you find elsewhere. Use them as primary stops or backups on future trips.</p></div><div className="page-head-actions"><button className="secondary" onClick={()=>setShowImporter(true)}>Import from Google Maps</button><button className="primary" onClick={openNew}>＋ Add campsite</button></div></div><div className="toolbar"><input placeholder="Search campsites..." value={search} onChange={e=>setSearch(e.target.value)}/><select value={areaFilter} onChange={e=>setAreaFilter(e.target.value)}>{areas.map(a=><option key={a}>{a}</option>)}</select><div className="seg"><button className={view==="list"?"selected":""} onClick={()=>setView("list")}>List</button><button className={view==="map"?"selected":""} onClick={()=>setView("map")}>Map</button></div></div>{!userEmail?<EmptyState title="Sign in to build your campsite library." action={()=>setAuthOpen(true)}/>:loadingCamps?<div className="loading">Loading campsites…</div>:view==="map"?<div className="map-card"><MapboxMap campsites={filtered} route={null} onSelect={openEdit}/></div>:<div className="table-card"><div className="table-head"><span>Campsite</span><span>Area</span><span>State / province</span><span>Type</span><span>Cost</span><span>Rating</span><span></span></div>{filtered.length?filtered.map(c=><div className="table-row" key={c.id}><div><strong>{c.favorite?"★ ":""}{c.name}</strong><small>{c.notes||"No notes yet"}</small></div><span>{c.area||"—"}</span><span>{c.state||"—"}</span><span>{c.type}</span><span>{c.cost==null?"—":c.cost===0?"Free":`$${c.cost}`}</span><span>{c.rating?"★".repeat(c.rating):"—"}</span><div className="row-actions"><button onClick={()=>addStop(c)}>＋ Trip</button><button onClick={()=>openEdit(c)}>Edit</button><button onClick={()=>deleteCampsite(c)}>Delete</button></div></div>):<div className="empty">No campsites match your filters.</div>}</div>}</section>}
+-      {tab==="Fuel"&&<FuelView mpg={mpg} setMpg={setMpg} tank={tank} setTank={setTank} reserve={reserve} setReserve={setReserve} priceCushion={priceCushion} setPriceCushion={setPriceCushion} mileageBuffer={mileageBuffer} setMileageBuffer={setMileageBuffer} safeRange={safeRange} fullRange={fullRange} route={route} stations={fuelStations} plan={fuelPlan} selectedTrip={selectedTrip} saveSettings={saveVehicleSettings}/>} 
++      {tab==="Fuel"&&<FuelView mpg={mpg} setMpg={setMpg} tank={tank} setTank={setTank} reserve={reserve} setReserve={setReserve} priceCushion={priceCushion} setPriceCushion={setPriceCushion} mileageBuffer={mileageBuffer} setMileageBuffer={setMileageBuffer} safeRange={safeRange} fullRange={fullRange} route={route} stations={fuelStations} stopPlan={fuelStopPlan} plan={fuelPlan} selectedTrip={selectedTrip} saveSettings={saveVehicleSettings}/>} 
+       {tab==="Budget"&&<BudgetView budget={budget} setBudget={setBudget} fuelBudget={fuelBudget} fuelPlan={fuelPlan}/>} 
+       {tab==="Pack List"&&<PackView pack={pack} setPack={setPack} newPack={newPack} setNewPack={setNewPack}/>} 
+     </main></div>
+@@ -178,10 +188,32 @@ export default function Home() {
+ 
+ function Dashboard({trips,campsites,safeRange,fuelBudget,createTrip}:any){return <section className="content"><div className="hero"><span className="eyebrow">OVERLAND PLANNER 0.7</span><h1>Plan the trip.<br/><i>Not everything else.</i></h1><p>A focused workspace for the parts of overlanding that are hardest to keep straight: campsites, routes, fuel and budget.</p><button className="primary" onClick={createTrip}>Build a trip</button></div><div className="stat-grid"><Stat n={trips.length} label="Saved trips"/><Stat n={campsites.length} label="Saved campsites"/><Stat n={`${safeRange} mi`} label="Current safe range"/><Stat n={fuelBudget?`$${Math.round(fuelBudget).toLocaleString()}`:"—"} label="Current fuel budget"/></div><div className="three"><Card title="Campsite library" text="Keep your own list of primary and backup campsites, with coordinates ready for routing."/><Card title="Fuel planning" text="Use current EIA averages, then deliberately add a price cushion and mileage reserve so the budget is conservative."/><Card title="Simple budget" text="Fuel becomes route-driven. Camping, food, park fees and everything else stay editable."/></div></section>}
+ 
+-function TripsView({trips,tripName,setTripName,start,setStart,createTrip,selectedTrip,setSelectedTrip,campsites,addStop,stops,setStops,route,routeLoading,calculateRoute,fuelStations,saveStops}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">TRIPS</span><h1>Route your stops.</h1><p>Pick campsites from your library. Then let routing and fuel planning handle the logistics.</p></div></div><div className="trip-builder"><div className="form-card"><h3>New trip</h3><label>Trip name<input value={tripName} onChange={e=>setTripName(e.target.value)}/></label><label>Starting point<input value={start} onChange={e=>setStart(e.target.value)}/></label><button className="primary" onClick={createTrip}>Create trip</button></div><div className="form-card"><h3>Saved trips</h3>{trips.length?trips.map((t:Trip)=><button className={selectedTrip?.id===t.id?"trip-item selected":"trip-item"} key={t.id} onClick={()=>setSelectedTrip(t)}><strong>{t.name}</strong><small>{t.start_location||"No start"}</small></button>):<div className="empty">No saved trips yet.</div>}</div></div>{selectedTrip&&<div className="route-workspace"><div className="route-sidebar"><div className="section-title"><div><span className="eyebrow">{selectedTrip.name}</span><h2>Stops</h2></div><button onClick={saveStops}>Save</button></div>{stops.map((s:Stop,i:number)=><div className="stop-row" key={`${s.id||s.name}-${i}`}><span>{i+1}</span><div><strong>{s.name}</strong><small>{s.latitude.toFixed(4)}, {s.longitude.toFixed(4)}</small></div><button onClick={()=>setStops((p:Stop[])=>p.filter((_,idx)=>idx!==i))}>×</button></div>)}<div className="library-mini"><b>Add from library</b>{campsites.slice(0,8).map((c:Campsite)=><button key={c.id} onClick={()=>addStop(c)}>＋ {c.name}</button>)}</div><button className="primary full" disabled={routeLoading} onClick={calculateRoute}>{routeLoading?"Calculating…":"Calculate route & fuel"}</button></div><div className="route-map"><MapboxMap campsites={campsites} route={route} stops={stops} fuelStations={fuelStations}/></div></div>}</section>}
++function TripsView({trips,tripName,setTripName,start,setStart,createTrip,selectedTrip,setSelectedTrip,campsites,addStop,stops,setStops,route,routeLoading,calculateRoute,fuelStations,fuelStopPlan,saveStops}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">TRIPS</span><h1>Route your stops.</h1><p>Pick campsites from your library. Then let routing and fuel planning handle the logistics.</p></div></div><div className="trip-builder"><div className="form-card"><h3>New trip</h3><label>Trip name<input value={tripName} onChange={e=>setTripName(e.target.value)}/></label><label>Starting point<input value={start} onChange={e=>setStart(e.target.value)}/></label><button className="primary" onClick={createTrip}>Create trip</button></div><div className="form-card"><h3>Saved trips</h3>{trips.length?trips.map((t:Trip)=><button className={selectedTrip?.id===t.id?"trip-item selected":"trip-item"} key={t.id} onClick={()=>setSelectedTrip(t)}><strong>{t.name}</strong><small>{t.start_location||"No start"}</small></button>):<div className="empty">No saved trips yet.</div>}</div></div>{selectedTrip&&<div className="route-workspace"><div className="route-sidebar"><div className="section-title"><div><span className="eyebrow">{selectedTrip.name}</span><h2>Stops</h2></div><button onClick={saveStops}>Save</button></div>{stops.map((s:Stop,i:number)=><div className="stop-row" key={`${s.id||s.name}-${i}`}><span>{i+1}</span><div><strong>{s.name}</strong><small>{s.latitude.toFixed(4)}, {s.longitude.toFixed(4)}</small></div><button onClick={()=>setStops((p:Stop[])=>p.filter((_,idx)=>idx!==i))}>×</button></div>)}<div className="library-mini"><b>Add from library</b>{campsites.slice(0,8).map((c:Campsite)=><button key={c.id} onClick={()=>addStop(c)}>＋ {c.name}</button>)}</div><button className="primary full" disabled={routeLoading} onClick={calculateRoute}>{routeLoading?"Calculating…":"Calculate route & fuel"}</button>{fuelStopPlan&&<FuelPlanSummary plan={fuelStopPlan}/>}</div><div className="route-map"><MapboxMap campsites={campsites} route={route} stops={stops} fuelStations={fuelStations}/></div></div>}</section>}
+ 
+-function FuelView({mpg,setMpg,tank,setTank,reserve,setReserve,priceCushion,setPriceCushion,mileageBuffer,setMileageBuffer,safeRange,fullRange,route,stations,plan,selectedTrip,saveSettings}:any){const miles=route?Math.round(route.distance/1609.344):0;const hours=route?Math.round(route.duration/3600*10)/10:0;return <section className="content"><div className="page-head"><div><span className="eyebrow">FUEL</span><h1>Build a conservative fuel budget.</h1><p>EIA provides the baseline. Your cushion and mileage reserve keep the trip budget from being too optimistic.</p></div></div><div className="fuel-grid"><div className="form-card"><h3>Vehicle & budget cushion</h3><label>MPG<input type="number" min="1" step="0.1" value={mpg} onChange={e=>setMpg(Number(e.target.value))}/></label><label>Tank gallons<input type="number" min="1" step="0.1" value={tank} onChange={e=>setTank(Number(e.target.value))}/></label><label>Tank reserve %<input type="number" min="0" max="50" step="1" value={reserve} onChange={e=>setReserve(Number(e.target.value))}/></label><label>Fuel price cushion / gallon<input type="number" min="0" step="0.05" value={priceCushion} onChange={e=>setPriceCushion(Number(e.target.value))}/></label><label>Mileage reserve %<input type="number" min="0" max="50" step="1" value={mileageBuffer} onChange={e=>setMileageBuffer(Number(e.target.value))}/></label><div className="big-number">{safeRange}<small>practical miles before reserve</small></div><span className="muted">{fullRange} miles at a full tank</span>{selectedTrip&&<button className="secondary full" onClick={saveSettings}>Save vehicle settings to this trip</button>}</div><div className="form-card"><h3>Current route</h3>{route?<><div className="metric-line"><span>Distance</span><b>{miles.toLocaleString()} mi</b></div><div className="metric-line"><span>Drive time</span><b>{hours} hr</b></div>{plan?.warning&&<div className="warning-box">{plan.warning}</div>}{plan?.estimatedCost!=null?<><div className="fuel-budget-number">${Math.round(plan.estimatedCost).toLocaleString()}<small>recommended fuel budget</small></div><div className="metric-line"><span>Route miles + reserve</span><b>{Math.round(plan.bufferedMiles).toLocaleString()} mi</b></div><div className="metric-line"><span>Planning gallons</span><b>{plan.gallons.toFixed(1)} gal</b></div><div className="metric-line"><span>Weighted EIA baseline</span><b>${plan.baselinePrice?.toFixed(2)}/gal</b></div><div className="metric-line"><span>Weighted planning price</span><b>${plan.planningPrice?.toFixed(2)}/gal</b></div><p className="muted">Planning price = EIA baseline + ${priceCushion.toFixed(2)}/gal. Mileage reserve is {mileageBuffer}%.</p></>:<div className="empty">Calculate the route again to generate the fuel budget.</div>}</>:<div className="empty">Calculate a route from the Trips page first.</div>}</div></div>{plan?.segments?.length>0&&<div className="fuel-segments"><div className="section-title"><div><span className="eyebrow">ROUTE LEGS</span><h2>Fuel cost by leg</h2></div><span className="muted">EIA weekly retail averages{plan.priceDate?` · week ${plan.priceDate}`:""}</span></div>{plan.segments.map((s:FuelSegment,i:number)=><div className="fuel-segment" key={`${s.from}-${s.to}-${i}`}><div><strong>{s.from} → {s.to}</strong><small>{s.state||"State unavailable"} · {Math.round(s.miles).toLocaleString()} route mi · {s.source||"No EIA price"}</small></div><div className="fuel-segment-right"><span>{s.price==null?"—":`$${s.price.toFixed(2)}/gal`}</span><b>{s.cost==null?"—":`$${Math.round(s.cost).toLocaleString()}`}</b></div></div>)}</div>}<div className="fuel-stations-card"><div className="section-title"><div><span className="eyebrow">MAPBOX</span><h2>Gas stations along the route</h2></div><span className="muted">Candidates within the route search corridor</span></div>{stations?.length?stations.slice(0,12).map((s:any)=>{const routeMiles=typeof s.routeMiles==="number"?Math.round(s.routeMiles):null;const rangeFlag=routeMiles!=null&&routeMiles<=safeRange?"Within first-tank range":routeMiles!=null?"Beyond first-tank range":"Route position unavailable";return <div className="station" key={s.properties?.mapbox_id||s.id}><div><strong>{s.properties?.name||s.text||"Gas station"}</strong><small>{s.properties?.full_address||s.properties?.place_formatted||""}{routeMiles!=null?` · ${routeMiles.toLocaleString()} route mi`:""}</small></div><span>{rangeFlag}</span></div>}):<div className="empty">No stations returned yet.</div>}<p className="muted">Stations are ordered by approximate position along the route. Your practical range is {safeRange.toLocaleString()} miles, so the first-tank marker helps identify where a fuel stop needs to happen. EIA supplies the planning price; it is not a station-specific pump quote.</p></div></section>}
++function FuelView({mpg,setMpg,tank,setTank,reserve,setReserve,priceCushion,setPriceCushion,mileageBuffer,setMileageBuffer,safeRange,fullRange,route,stations,stopPlan,plan,selectedTrip,saveSettings}:any){const miles=route?Math.round(route.distance/1609.344):0;const hours=route?Math.round(route.duration/3600*10)/10:0;return <section className="content"><div className="page-head"><div><span className="eyebrow">FUEL</span><h1>Build a conservative fuel budget.</h1><p>EIA provides the baseline. Your cushion and mileage reserve keep the trip budget from being too optimistic.</p></div></div><div className="fuel-grid"><div className="form-card"><h3>Vehicle & budget cushion</h3><label>MPG<input type="number" min="1" step="0.1" value={mpg} onChange={e=>setMpg(Number(e.target.value))}/></label><label>Tank gallons<input type="number" min="1" step="0.1" value={tank} onChange={e=>setTank(Number(e.target.value))}/></label><label>Tank reserve %<input type="number" min="0" max="50" step="1" value={reserve} onChange={e=>setReserve(Number(e.target.value))}/></label><label>Fuel price cushion / gallon<input type="number" min="0" step="0.05" value={priceCushion} onChange={e=>setPriceCushion(Number(e.target.value))}/></label><label>Mileage reserve %<input type="number" min="0" max="50" step="1" value={mileageBuffer} onChange={e=>setMileageBuffer(Number(e.target.value))}/></label><div className="big-number">{safeRange}<small>practical miles before reserve</small></div><span className="muted">{fullRange} miles at a full tank</span>{selectedTrip&&<button className="secondary full" onClick={saveSettings}>Save vehicle settings to this trip</button>}</div><div className="form-card"><h3>Current route</h3>{route?<><div className="metric-line"><span>Distance</span><b>{miles.toLocaleString()} mi</b></div><div className="metric-line"><span>Drive time</span><b>{hours} hr</b></div>{plan?.warning&&<div className="warning-box">{plan.warning}</div>}{plan?.estimatedCost!=null?<><div className="fuel-budget-number">${Math.round(plan.estimatedCost).toLocaleString()}<small>recommended fuel budget</small></div><div className="metric-line"><span>Route miles + reserve</span><b>{Math.round(plan.bufferedMiles).toLocaleString()} mi</b></div><div className="metric-line"><span>Planning gallons</span><b>{plan.gallons.toFixed(1)} gal</b></div><div className="metric-line"><span>Weighted EIA baseline</span><b>${plan.baselinePrice?.toFixed(2)}/gal</b></div><div className="metric-line"><span>Weighted planning price</span><b>${plan.planningPrice?.toFixed(2)}/gal</b></div><p className="muted">Planning price = EIA baseline + ${priceCushion.toFixed(2)}/gal. Mileage reserve is {mileageBuffer}%.</p></>:<div className="empty">Calculate the route again to generate the fuel budget.</div>}</>:<div className="empty">Calculate a route from the Trips page first.</div>}</div></div>{plan?.segments?.length>0&&<div className="fuel-segments"><div className="section-title"><div><span className="eyebrow">ROUTE LEGS</span><h2>Fuel cost by leg</h2></div><span className="muted">EIA weekly retail averages{plan.priceDate?` · week ${plan.priceDate}`:""}</span></div>{plan.segments.map((s:FuelSegment,i:number)=><div className="fuel-segment" key={`${s.from}-${s.to}-${i}`}><div><strong>{s.from} → {s.to}</strong><small>{s.state||"State unavailable"} · {Math.round(s.miles).toLocaleString()} route mi · {s.source||"No EIA price"}</small></div><div className="fuel-segment-right"><span>{s.price==null?"—":`$${s.price.toFixed(2)}/gal`}</span><b>{s.cost==null?"—":`$${Math.round(s.cost).toLocaleString()}`}</b></div></div>)}</div>}<FuelStopsCard stations={stations} stopPlan={stopPlan} route={route}/></section>}
+ 
++const mi=(n:number)=>Math.round(n).toLocaleString();
++function FuelPlanSummary({plan}:{plan:FuelStopPlan}){
++  const bad=!plan.feasible;
++  return <div className={bad?"plan-box plan-bad":"plan-box plan-ok"}><b>{plan.problem?"Fuel plan needs attention":bad?"Fuel gap on this route":`Fuel plan OK · ${plan.stops.length} fuel stop${plan.stops.length===1?"":"s"}`}</b><span>{plan.problem||(bad?"See the Fuel tab for where and how much extra fuel is needed.":`Arrive everywhere with ${mi(plan.range.arrivalFloor)}+ mi of range.`)}</span></div>
++}
++function FuelStopsCard({stations,stopPlan,route}:{stations:FuelStation[];stopPlan:FuelStopPlan|null;route:any}){
++  return <div className="fuel-stations-card"><div className="section-title"><div><span className="eyebrow">FUEL STOPS</span><h2>Range-safe fuel plan</h2></div><span className="muted">Never arrive with less than {MIN_ARRIVAL_RANGE_MILES} mi of range</span></div>
++  {!route?<div className="empty">Calculate a route from the Trips page first.</div>:!stopPlan?<div className="empty">No fuel plan yet. Calculate the route again.</div>:<>
++    {stopPlan.problem?<div className="warning-box">{stopPlan.problem}</div>:<>
++    <p className="muted">Usable range per tank is {mi(stopPlan.range.effectiveRange)} mi (MPG × tank, less your mileage reserve). Every arrival must keep at least {mi(stopPlan.range.arrivalFloor)} mi, so fuel stops are at most {mi(stopPlan.range.maxHop)} mi apart. The plan assumes you leave with a full tank and fill up at each stop listed.</p>
++    <div className={stopPlan.feasible?"plan-box plan-ok":"plan-box plan-bad"}><b>{stopPlan.feasible?`Meets the rule with ${stopPlan.stops.length} fuel stop${stopPlan.stops.length===1?"":"s"}`:"Does not meet the rule on this route"}</b></div>
++    {stopPlan.gaps.map((g,i)=><div className="warning-box" key={i}><b>No fuel between mile {mi(g.fromMile)} and mile {mi(g.toMile)}</b> ({mi(g.distance)} mi). {g.shortfallMiles>0?`That is ${mi(g.shortfallMiles)} mi more than the vehicle can cover and still keep ${mi(stopPlan.range.arrivalFloor)} mi in reserve. Carry about ${g.extraGallons.toFixed(1)} extra gallons, add a fuel source, or reroute.`:""}{g.dataIncomplete?" Some station searches failed for this stretch, so a station may exist. Try calculating again.":""}</div>)}
++    {stopPlan.failedWindows.length>0&&stopPlan.gaps.length===0&&<div className="warning-box">{stopPlan.failedWindows.length} station search{stopPlan.failedWindows.length===1?"":"es"} failed ({stopPlan.failedWindows[0].error}). The plan may use more or longer hops than necessary. Try calculating again.</div>}
++    <h3>Arrival range</h3>
++    {stopPlan.arrivals.map((a,i)=><div className="arrival-row" key={i}><div><strong>{a.name}</strong><small>mile {mi(a.mile)}</small></div><span className={a.ok?"ok":"bad"}>{mi(Math.max(0,a.rangeOnArrival))} mi left {a.ok?"":"· below minimum"}</span></div>)}
++    <h3>Fuel stops to take</h3>
++    {stopPlan.stops.length?stopPlan.stops.map((f,i)=><div className="station" key={f.station.id}><div><strong>{i+1}. {f.station.name}</strong><small>{f.station.address}{f.station.address?" · ":""}mile {mi(f.mile)}{f.station.detourMinutes!=null?` · +${Math.round(f.station.detourMinutes)} min detour`:` · ${f.station.offsetMiles.toFixed(1)} mi off route`}</small></div><span>{mi(f.milesSincePrevious)} mi since last fill · {mi(Math.max(0,f.rangeOnArrival))} mi left</span></div>):<div className="empty">No fuel stop needed. The trip fits within a single tank while keeping your reserve.</div>}
++    <details><summary>All {stations.length} stations found along the route</summary>{stations.map(s=><div className="station" key={s.id}><div><strong>{s.name}{s.planned?" ★":""}</strong><small>{s.address}{s.address?" · ":""}mile {mi(s.mile)}</small></div><span>{s.detourMinutes!=null?`+${Math.round(s.detourMinutes)} min`:`${s.offsetMiles.toFixed(1)} mi off`}</span></div>)}</details>
++    </>}
++    <p className="muted">Stations come from Mapbox search along the route, checked in sections so the whole trip is covered. EIA supplies the planning price; it is not a station-specific pump quote.</p></>}
++  </div>
++}
+ function BudgetView({budget,setBudget,fuelBudget,fuelPlan}:any){const nonFuel=Object.values(budget).reduce((a:number,b:any)=>a+Number(b),0);const total=nonFuel+fuelBudget;return <section className="content"><div className="page-head"><div><span className="eyebrow">BUDGET</span><h1>Keep the math simple.</h1><p>Fuel is route-driven. Everything else stays editable.</p></div></div><div className="budget-card">{Object.entries(budget).map(([k,v]:any)=><label key={k}>{k.replace("fees","park fees").replace("camp","camping").replace("other","other").replace("food","food")}<input type="number" value={v} onChange={e=>setBudget({...budget,[k]:Number(e.target.value)})}/></label>)}<label className="budget-fuel"><span>Fuel budget</span><strong>{fuelBudget?`$${Math.round(fuelBudget).toLocaleString()}`:"—"}</strong></label><div className="total"><span>Trip budget</span><strong>${Math.round(total).toLocaleString()}</strong></div>{fuelPlan?.estimatedCost!=null&&<p className="muted">Fuel budget is based on route miles, {fuelPlan.gallons.toFixed(1)} planning gallons, EIA pricing and your configured cushion.</p>}</div></section>}
+ 
+ function PackView({pack,setPack,newPack,setNewPack}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">PACK LIST</span><h1>Reuse your loadout.</h1><p>A simple checklist. Nothing more.</p></div></div><div className="pack-card"><div className="add-row"><input placeholder="Add item" value={newPack} onChange={e=>setNewPack(e.target.value)}/><button className="primary" onClick={()=>{if(newPack.trim()){setPack([...pack,newPack.trim()]);setNewPack("")}}}>Add</button></div>{pack.map((x:string,i:number)=><label className="check" key={`${x}-${i}`}><input type="checkbox"/><span>{x}</span></label>)}</div></section>}
+@@ -361,6 +393,3 @@ function CampForm({initial,onClose,onSave,onDelete}:any){const blank={name:"",ar
+ function AuthModal({email,password,setEmail,setPassword,busy,onClose,onSignIn,onSignUp}:any){return <div className="modal-backdrop"><div className="modal auth"><div className="modal-head"><div><span className="eyebrow">ACCOUNT</span><h2>Save your planner.</h2></div><button onClick={onClose}>×</button></div><label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)}/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)}/></label><div className="modal-actions"><button disabled={busy} onClick={onSignIn}>Sign in</button><button className="primary" disabled={busy} onClick={onSignUp}>Create account</button></div></div></div>}
+ function Stat({n,label}:any){return <div className="stat"><strong>{n}</strong><span>{label}</span></div>};function Card({title,text}:any){return <div className="feature-card"><h3>{title}</h3><p>{text}</p></div>};function EmptyState({title,action}:any){return <div className="empty"><strong>{title}</strong><button onClick={action}>Sign in</button></div>}
+ function haversineMiles(a:[number,number],b:[number,number]){const r=3958.7613;const dLat=(b[1]-a[1])*Math.PI/180;const dLon=(b[0]-a[0])*Math.PI/180;const lat1=a[1]*Math.PI/180;const lat2=b[1]*Math.PI/180;const x=Math.sin(dLat/2)**2+Math.sin(dLon/2)**2*Math.cos(lat1)*Math.cos(lat2);return 2*r*Math.asin(Math.sqrt(x))}
+-function addRouteMiles(stations:any[],geometry:any){const coords=geometry?.coordinates||[];if(!coords.length)return stations;let cumulative=0;const distances:number[]=[0];for(let i=1;i<coords.length;i++){cumulative+=haversineMiles(coords[i-1],coords[i]);distances.push(cumulative)}return stations.map((station:any)=>{const point=station.geometry?.coordinates;if(!point)return station;let nearest=0;let best=Infinity;coords.forEach((c:number[],i:number)=>{const d=haversineMiles(point as [number,number],c as [number,number]);if(d<best){best=d;nearest=i}});return {...station,routeMiles:distances[nearest],routeOffsetMiles:best}}).sort((a:any,b:any)=>(a.routeMiles??Infinity)-(b.routeMiles??Infinity))}
+-function encodePolyline6(coords:number[][]){let lastLat=0,lastLng=0,out="";for(const [lng,lat] of coords){const lat6=Math.round(lat*1e6),lng6=Math.round(lng*1e6);out+=encodeSigned(lat6-lastLat)+encodeSigned(lng6-lastLng);lastLat=lat6;lastLng=lng6;}return out}
+-function encodeSigned(v:number){let n=v<0?~(v<<1):(v<<1);let s="";while(n>=0x20){s+=String.fromCharCode((0x20|(n&0x1f))+63);n>>=5}s+=String.fromCharCode(n+63);return s}
+diff --git a/lib/fuel.ts b/lib/fuel.ts
+new file mode 100644
+index 0000000..a0c1703
+--- /dev/null
++++ b/lib/fuel.ts
+@@ -0,0 +1,405 @@
++// Range-aware fuel stop planning for the route planner.
++//
++// Two jobs:
++//   1. findStationsAlongRoute(): split the route into windows and run one
++//      Mapbox search-along-route request per window, so gas stations are
++//      found along the whole trip (a single request returns at most 25).
++//   2. planFuelStops(): choose the fewest fuel stops that keep the driver at
++//      or above the minimum arrival range at every stop and destination.
++
++export const MIN_ARRIVAL_RANGE_MILES = 100;
++const METERS_PER_MILE = 1609.344;
++
++export type VehicleSettings = {
++  mpg: number;
++  tankGallons: number;
++  reservePercent: number;
++  mileageBufferPercent: number;
++};
++
++export type RangeModel = {
++  /** Nominal miles on a full tank (mpg x tank). */
++  fullRange: number;
++  /** Real route miles on a full tank after the mileage reserve is applied. */
++  effectiveRange: number;
++  /** Miles the tank-reserve percentage represents. */
++  reserveMiles: number;
++  /** Range that must remain on arrival: the larger of 100 mi and the reserve. */
++  arrivalFloor: number;
++  /** Longest leg allowed between fills (full tank in, floor remaining out). */
++  maxHop: number;
++};
++
++export function computeRange(v: VehicleSettings): RangeModel {
++  const mpg = Number.isFinite(v.mpg) && v.mpg > 0 ? v.mpg : 0;
++  const tank = Number.isFinite(v.tankGallons) && v.tankGallons > 0 ? v.tankGallons : 0;
++  const buffer = Math.max(0, Number.isFinite(v.mileageBufferPercent) ? v.mileageBufferPercent : 0);
++  const reserve = Math.min(100, Math.max(0, Number.isFinite(v.reservePercent) ? v.reservePercent : 0));
++  const fullRange = mpg * tank;
++  const effectiveRange = fullRange / (1 + buffer / 100);
++  const reserveMiles = effectiveRange * (reserve / 100);
++  const arrivalFloor = Math.max(MIN_ARRIVAL_RANGE_MILES, reserveMiles);
++  return { fullRange, effectiveRange, reserveMiles, arrivalFloor, maxHop: Math.max(0, effectiveRange - arrivalFloor) };
++}
++
++export type FuelStation = {
++  id: string;
++  name: string;
++  address: string;
++  lng: number;
++  lat: number;
++  /** Miles along the route where the station's turn-off is. */
++  mile: number;
++  /** Straight-line miles from the route. */
++  offsetMiles: number;
++  /** Extra drive time to visit, from Mapbox, when provided. */
++  detourMinutes: number | null;
++  planned?: boolean;
++};
++
++export type WindowFailure = { fromMile: number; toMile: number; error: string };
++
++// ---------------------------------------------------------------- geometry
++
++type Pt = [number, number]; // [lng, lat]
++
++function haversineMiles(a: Pt, b: Pt) {
++  const r = 3958.7613;
++  const dLat = ((b[1] - a[1]) * Math.PI) / 180;
++  const dLon = ((b[0] - a[0]) * Math.PI) / 180;
++  const lat1 = (a[1] * Math.PI) / 180;
++  const lat2 = (b[1] * Math.PI) / 180;
++  const x = Math.sin(dLat / 2) ** 2 + Math.sin(dLon / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
++  return 2 * r * Math.asin(Math.sqrt(x));
++}
++
++/** Cumulative miles at each vertex, scaled so the total equals the routed distance. */
++export function cumulativeMiles(coords: Pt[], routeMeters: number): number[] {
++  const cum = [0];
++  for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + haversineMiles(coords[i - 1], coords[i]));
++  const total = cum[cum.length - 1];
++  const target = routeMeters / METERS_PER_MILE;
++  const scale = total > 0 && target > 0 ? target / total : 1;
++  return cum.map((d) => d * scale);
++}
++
++/** Planar projection of a point onto the polyline slice [i0, i1]. */
++function projectOnPolyline(p: Pt, coords: Pt[], cum: number[], i0: number, i1: number) {
++  const cosLat = Math.cos((p[1] * Math.PI) / 180);
++  const milesPerDegLat = 69.0468;
++  const milesPerDegLng = milesPerDegLat * cosLat;
++  let best = { offsetMiles: Infinity, mile: cum[i0] };
++  for (let i = i0; i < i1; i++) {
++    const a = coords[i];
++    const b = coords[i + 1];
++    const ax = (a[0] - p[0]) * milesPerDegLng, ay = (a[1] - p[1]) * milesPerDegLat;
++    const bx = (b[0] - p[0]) * milesPerDegLng, by = (b[1] - p[1]) * milesPerDegLat;
++    const dx = bx - ax, dy = by - ay;
++    const len2 = dx * dx + dy * dy;
++    const t = len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
++    const px = ax + t * dx, py = ay + t * dy;
++    const off = Math.sqrt(px * px + py * py);
++    if (off < best.offsetMiles) best = { offsetMiles: off, mile: cum[i] + t * (cum[i + 1] - cum[i]) };
++  }
++  return best;
++}
++
++/** Iterative Douglas-Peucker in a local planar frame; tolerance in miles. */
++function simplify(coords: Pt[], toleranceMiles: number): Pt[] {
++  if (coords.length <= 2) return coords;
++  const lat0 = coords[Math.floor(coords.length / 2)][1];
++  const kx = 69.0468 * Math.cos((lat0 * Math.PI) / 180), ky = 69.0468;
++  const xs = coords.map((c) => c[0] * kx), ys = coords.map((c) => c[1] * ky);
++  const keep = new Uint8Array(coords.length);
++  keep[0] = keep[coords.length - 1] = 1;
++  const stack: [number, number][] = [[0, coords.length - 1]];
++  while (stack.length) {
++    const [s, e] = stack.pop()!;
++    let maxD = 0, idx = -1;
++    const dx = xs[e] - xs[s], dy = ys[e] - ys[s];
++    const len2 = dx * dx + dy * dy;
++    for (let i = s + 1; i < e; i++) {
++      let d: number;
++      if (len2 === 0) d = Math.hypot(xs[i] - xs[s], ys[i] - ys[s]);
++      else {
++        const t = Math.max(0, Math.min(1, ((xs[i] - xs[s]) * dx + (ys[i] - ys[s]) * dy) / len2));
++        d = Math.hypot(xs[i] - (xs[s] + t * dx), ys[i] - (ys[s] + t * dy));
++      }
++      if (d > maxD) { maxD = d; idx = i; }
++    }
++    if (idx !== -1 && maxD > toleranceMiles) { keep[idx] = 1; stack.push([s, idx], [idx, e]); }
++  }
++  return coords.filter((_, i) => keep[i]);
++}
++
++function encodeSigned(v: number) {
++  let n = v < 0 ? ~(v << 1) : v << 1;
++  let s = "";
++  while (n >= 0x20) { s += String.fromCharCode((0x20 | (n & 0x1f)) + 63); n >>= 5; }
++  return s + String.fromCharCode(n + 63);
++}
++
++export function encodePolyline6(coords: Pt[]) {
++  let lastLat = 0, lastLng = 0, out = "";
++  for (const [lng, lat] of coords) {
++    const lat6 = Math.round(lat * 1e6), lng6 = Math.round(lng * 1e6);
++    out += encodeSigned(lat6 - lastLat) + encodeSigned(lng6 - lastLng);
++    lastLat = lat6; lastLng = lng6;
++  }
++  return out;
++}
++
++// ------------------------------------------------------ search along route
++
++type RouteWindow = { fromMile: number; toMile: number; i0: number; i1: number };
++
++export function splitRoute(cum: number[], windowMiles: number): RouteWindow[] {
++  const total = cum[cum.length - 1];
++  if (cum.length < 2 || total <= 0) return [];
++  // Spread the route evenly so there is no tiny trailing window.
++  const count = Math.max(1, Math.round(total / Math.max(20, windowMiles)));
++  const size = total / count;
++  const windows: RouteWindow[] = [];
++  for (let k = 0; k < count; k++) {
++    const from = k * size;
++    const to = k === count - 1 ? total : (k + 1) * size;
++    let i0 = 0;
++    while (i0 < cum.length - 2 && cum[i0 + 1] <= from) i0++; // last vertex at or before `from`
++    let i1 = Math.max(i0 + 1, 0);
++    while (i1 < cum.length - 1 && cum[i1] < to) i1++; // first vertex at or after `to`
++    windows.push({ fromMile: from, toMile: to, i0, i1 });
++  }
++  return windows;
++}
++
++const MAX_URL = 7000;
++
++function buildSearchUrl(slice: Pt[], token: string, deviationMinutes: number) {
++  let tol = 0.15;
++  let url = "";
++  for (let attempt = 0; attempt < 8; attempt++) {
++    const encoded = encodePolyline6(simplify(slice, tol));
++    url =
++      `https://api.mapbox.com/search/searchbox/v1/category/gas_station` +
++      `?route=${encodeURIComponent(encoded)}&route_geometry=polyline6&sar_type=isochrone` +
++      `&time_deviation=${deviationMinutes}&limit=25&access_token=${token}`;
++    if (url.length <= MAX_URL) break;
++    tol *= 2;
++  }
++  return url;
++}
++
++async function fetchJson(url: string, retries = 2): Promise<any> {
++  let lastError = "request failed";
++  for (let attempt = 0; attempt <= retries; attempt++) {
++    try {
++      const res = await fetch(url);
++      if (res.ok) return await res.json();
++      lastError = `Mapbox returned ${res.status}`;
++      // 4xx other than rate limiting will not improve on retry.
++      if (res.status !== 429 && res.status < 500) break;
++    } catch (e: any) {
++      lastError = e?.message || "network error";
++    }
++    if (attempt < retries) await new Promise((r) => setTimeout(r, 400 * 2 ** attempt));
++  }
++  throw new Error(lastError);
++}
++
++function num(v: unknown): number | null {
++  const n = typeof v === "string" ? Number(v) : (v as number);
++  return typeof n === "number" && Number.isFinite(n) ? n : null;
++}
++
++function detourMinutesOf(props: any): number | null {
++  return num(props?.added_time) ?? num(props?.metadata?.added_time) ?? num(props?.eta_added);
++}
++
++async function pool<T, R>(items: T[], size: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
++  const out: R[] = new Array(items.length);
++  let next = 0;
++  await Promise.all(
++    Array.from({ length: Math.min(size, items.length) }, async () => {
++      while (next < items.length) {
++        const i = next++;
++        out[i] = await fn(items[i], i);
++      }
++    })
++  );
++  return out;
++}
++
++/**
++ * Find gas stations along the entire route. The route is cut into windows
++ * (about a third of the vehicle's usable hop, 50-150 mi) and each window is
++ * searched separately, in parallel, with a simplified polyline so the request
++ * URL stays short. A window with no hits is retried with a wider detour.
++ */
++export async function findStationsAlongRoute(
++  geometry: { coordinates: number[][] },
++  routeMeters: number,
++  token: string,
++  vehicle: VehicleSettings
++): Promise<{ stations: FuelStation[]; failedWindows: WindowFailure[]; windowCount: number }> {
++  const coords = (geometry?.coordinates || []) as Pt[];
++  if (coords.length < 2) return { stations: [], failedWindows: [], windowCount: 0 };
++  const cum = cumulativeMiles(coords, routeMeters);
++  const { maxHop } = computeRange(vehicle);
++  const windowMiles = maxHop > 0 ? Math.min(150, Math.max(50, maxHop / 3)) : 100;
++  const windows = splitRoute(cum, windowMiles);
++
++  const failedWindows: WindowFailure[] = [];
++  const perWindow = await pool(windows, 4, async (win) => {
++    const slice = coords.slice(win.i0, win.i1 + 1);
++    try {
++      let data = await fetchJson(buildSearchUrl(slice, token, 15));
++      if (!(data?.features?.length > 0)) data = await fetchJson(buildSearchUrl(slice, token, 45));
++      return (data?.features || []) as any[];
++    } catch (e: any) {
++      failedWindows.push({ fromMile: win.fromMile, toMile: win.toMile, error: e?.message || "search failed" });
++      return [] as any[];
++    }
++  });
++
++  const byKey = new Map<string, FuelStation>();
++  perWindow.forEach((features, w) => {
++    const win = windows[w];
++    for (const f of features) {
++      const c = f?.geometry?.coordinates;
++      if (!Array.isArray(c) || c.length < 2) continue;
++      const point: Pt = [Number(c[0]), Number(c[1])];
++      const proj = projectOnPolyline(point, coords, cum, win.i0, win.i1);
++      const props = f.properties || {};
++      const id = String(props.mapbox_id || f.id || `${point[0].toFixed(5)},${point[1].toFixed(5)}`);
++      const station: FuelStation = {
++        id,
++        name: props.name || f.text || "Gas station",
++        address: props.full_address || props.place_formatted || props.address || "",
++        lng: point[0],
++        lat: point[1],
++        mile: proj.mile,
++        offsetMiles: proj.offsetMiles,
++        detourMinutes: detourMinutesOf(props),
++      };
++      const prev = byKey.get(id);
++      if (!prev || station.offsetMiles < prev.offsetMiles) byKey.set(id, station);
++    }
++  });
++
++  const stations = [...byKey.values()].sort((a, b) => a.mile - b.mile);
++  return { stations, failedWindows, windowCount: windows.length };
++}
++
++// ---------------------------------------------------------------- planning
++
++export type Waypoint = { name: string; mile: number };
++
++export type PlannedFuelStop = {
++  station: FuelStation;
++  mile: number;
++  milesSincePrevious: number;
++  rangeOnArrival: number;
++};
++
++export type FuelGap = {
++  fromMile: number;
++  toMile: number;
++  distance: number;
++  shortfallMiles: number;
++  extraGallons: number;
++  /** True when a station search failed inside this stretch, so a station may exist. */
++  dataIncomplete: boolean;
++};
++
++export type Arrival = { name: string; mile: number; rangeOnArrival: number; ok: boolean };
++
++export type FuelStopPlan = {
++  range: RangeModel;
++  stops: PlannedFuelStop[];
++  gaps: FuelGap[];
++  arrivals: Arrival[];
++  feasible: boolean;
++  failedWindows: WindowFailure[];
++  problem: string | null;
++};
++
++const SAME_SPOT_MILES = 0.5;
++const PREFER_LOW_DETOUR_BAND_MILES = 8;
++
++function detourScore(s: FuelStation) {
++  return s.detourMinutes ?? s.offsetMiles * 2;
++}
++
++/**
++ * Greedy planner: leave full, and at each step take the furthest station the
++ * vehicle can reach while still keeping the arrival floor (within a small
++ * band, prefer the smallest detour). Greedy-furthest uses the fewest stops and
++ * finds a plan whenever one exists. Where no station is reachable, the stretch
++ * is reported as a gap along with the extra fuel needed to cover it.
++ */
++export function planFuelStops(
++  stations: FuelStation[],
++  waypoints: Waypoint[],
++  totalMiles: number,
++  vehicle: VehicleSettings,
++  failedWindows: WindowFailure[] = []
++): FuelStopPlan {
++  const range = computeRange(vehicle);
++  const empty = (problem: string): FuelStopPlan => ({
++    range, stops: [], gaps: [], arrivals: [], feasible: false, failedWindows, problem,
++  });
++  if (!(vehicle.mpg > 0) || !(vehicle.tankGallons > 0)) return empty("Enter your MPG and tank size to plan fuel stops.");
++  if (range.maxHop <= 0) {
++    return empty(
++      `With ${Math.round(range.effectiveRange)} mi of usable range, this vehicle cannot keep ${Math.round(range.arrivalFloor)} mi in reserve on arrival. Increase tank size or MPG, or lower the mileage reserve.`
++    );
++  }
++
++  const sorted = [...stations].sort((a, b) => a.mile - b.mile);
++  const fills: PlannedFuelStop[] = [];
++  const gaps: FuelGap[] = [];
++  const overlapsFailure = (a: number, b: number) => failedWindows.some((w) => w.fromMile < b && w.toMile > a);
++  const gallonsFor = (miles: number) => (miles * (1 + Math.max(0, vehicle.mileageBufferPercent) / 100)) / vehicle.mpg;
++
++  let pos = 0; // last fill; the trip starts with a full tank
++  for (let guard = 0; totalMiles - pos > range.maxHop + 1e-6 && guard < 500; guard++) {
++    const reach = pos + range.maxHop;
++    const inReach = sorted.filter((s) => s.mile > pos + SAME_SPOT_MILES && s.mile <= reach);
++    if (inReach.length) {
++      const furthest = inReach[inReach.length - 1].mile;
++      const band = inReach.filter((s) => s.mile >= furthest - PREFER_LOW_DETOUR_BAND_MILES);
++      const pick = band.reduce((a, b) => (detourScore(b) < detourScore(a) ? b : a));
++      fills.push({
++        station: pick, mile: pick.mile, milesSincePrevious: pick.mile - pos,
++        rangeOnArrival: range.effectiveRange - (pick.mile - pos),
++      });
++      pos = pick.mile;
++    } else {
++      const next = sorted.find((s) => s.mile > reach);
++      const toMile = next ? next.mile : totalMiles;
++      const shortfall = toMile - pos - range.maxHop;
++      gaps.push({
++        fromMile: pos, toMile, distance: toMile - pos, shortfallMiles: shortfall,
++        extraGallons: gallonsFor(shortfall), dataIncomplete: overlapsFailure(pos, toMile),
++      });
++      if (!next) break;
++      fills.push({
++        station: next, mile: next.mile, milesSincePrevious: next.mile - pos,
++        rangeOnArrival: range.effectiveRange - (next.mile - pos),
++      });
++      pos = next.mile;
++    }
++  }
++
++  const arrivals: Arrival[] = waypoints.map((w) => {
++    const lastFill = fills.reduce((m, f) => (f.mile <= w.mile + 1e-6 ? Math.max(m, f.mile) : m), 0);
++    const rangeOnArrival = range.effectiveRange - (w.mile - lastFill);
++    return { name: w.name, mile: w.mile, rangeOnArrival, ok: rangeOnArrival >= range.arrivalFloor - 1e-6 };
++  });
++
++  return {
++    range, stops: fills, gaps, arrivals,
++    feasible: gaps.length === 0 && arrivals.every((a) => a.ok),
++    failedWindows, problem: null,
++  };
++}
