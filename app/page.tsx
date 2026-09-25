@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import MapboxMap from "./map";
+import { STATE_NAMES, extractPlaceCoordinates, stateFromFeature } from "@/lib/geo";
 
 type Campsite = {
   id: string; name: string; area: string; state: string; type: string; latitude: number; longitude: number;
@@ -38,10 +39,6 @@ type FuelPlan = {
   routeMiles: number; bufferedMiles: number; gallons: number; baselinePrice: number | null;
   planningPrice: number | null; estimatedCost: number | null; segments: FuelSegment[];
   states: string[]; priceDate: string | null; warning: string | null;
-};
-
-const STATE_NAMES: Record<string, string> = {
-  Alabama:"AL", Alaska:"AK", Arizona:"AZ", Arkansas:"AR", California:"CA", Colorado:"CO", Connecticut:"CT", Delaware:"DE", Florida:"FL", Georgia:"GA", Hawaii:"HI", Idaho:"ID", Illinois:"IL", Indiana:"IN", Iowa:"IA", Kansas:"KS", Kentucky:"KY", Louisiana:"LA", Maine:"ME", Maryland:"MD", Massachusetts:"MA", Michigan:"MI", Minnesota:"MN", Mississippi:"MS", Missouri:"MO", Montana:"MT", Nebraska:"NE", Nevada:"NV", "New Hampshire":"NH", "New Jersey":"NJ", "New Mexico":"NM", "New York":"NY", "North Carolina":"NC", "North Dakota":"ND", Ohio:"OH", Oklahoma:"OK", Oregon:"OR", Pennsylvania:"PA", "Rhode Island":"RI", "South Carolina":"SC", "South Dakota":"SD", Tennessee:"TN", Texas:"TX", Utah:"UT", Vermont:"VT", Virginia:"VA", Washington:"WA", "West Virginia":"WV", Wisconsin:"WI", Wyoming:"WY", "District of Columbia":"DC"
 };
 
 const sampleCampsites: Campsite[] = [
@@ -106,13 +103,19 @@ export default function Home() {
   async function saveVehicleSettings(){if(!selectedTrip)return;const payload={mpg,tank_gallons:tank,fuel_reserve_percent:reserve,fuel_price_cushion:priceCushion,fuel_mileage_buffer:mileageBuffer};const {data,error}=await createClient().from("trips").update(payload).eq("id",selectedTrip.id).select().single();if(error){setMessage(error.message);return}setSelectedTrip(data);setTrips(prev=>prev.map(t=>t.id===data.id?data:t));setMessage("Vehicle and fuel settings saved.")}
 
   async function getStopStates(points:Stop[], token:string):Promise<string[]> {
-    try {
-      const body=points.map(p=>({types:["region"],longitude:p.longitude,latitude:p.latitude,limit:1}));
-      const response=await fetch(`https://api.mapbox.com/search/geocode/v6/batch?access_token=${token}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-      if(!response.ok)return points.map(()=>"");
-      const data=await response.json();
-      return (data.batch||[]).map((result:any)=>{const feature=result.features?.find((f:any)=>f.properties?.feature_type==="region")||result.features?.[0];const name=feature?.properties?.name_preferred||feature?.properties?.name||"";return STATE_NAMES[name]||""});
-    } catch { return points.map(()=>""); }
+    // Returns state abbreviations. Batch requests are capped at 50 queries.
+    const out:string[]=points.map(()=>"");
+    for(let start=0;start<points.length;start+=50){
+      try{
+        const chunk=points.slice(start,start+50);
+        const body=chunk.map(p=>({types:["region"],longitude:p.longitude,latitude:p.latitude,limit:1}));
+        const response=await fetch(`https://api.mapbox.com/search/geocode/v6/batch?access_token=${token}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+        if(!response.ok)continue;
+        const data=await response.json();
+        (data.batch||[]).forEach((result:any,j:number)=>{out[start+j]=STATE_NAMES[stateFromFeature(result?.features?.[0])]||""});
+      }catch{}
+    }
+    return out;
   }
 
   async function geocodeStart(location:string, token:string){
@@ -201,7 +204,7 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
         const name=(r.title||r.name||r.saved_place||r.place||r.label||`Saved place ${i+1}`).trim();
         const url=(r.url||r.link||r.google_maps_url||r.google_maps_link||"").trim();
         const note=(r.note||r.notes||r.description||"").trim();
-        const coords=extractGoogleCoordinates(url); const dup=isDuplicate(name,coords,existing);
+        const coords=extractPlaceCoordinates(name,url); const dup=isDuplicate(name,coords,existing);
         return {key:`${i}-${name}-${url}`,name,area:"",state:"",type:"Other",latitude:coords?.latitude??null,longitude:coords?.longitude??null,source_url:url,notes:note,selected:!dup,status:(dup?"duplicate":coords?"ready":"needs-location") as ImportCandidate["status"]};
       });
       let next=candidates;
@@ -219,57 +222,52 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
   }
 
   async function geocodeMissing(input:ImportCandidate[],mapboxToken:string){
+    // Search Box (not the v6 geocoder) is the API that knows about points of
+    // interest such as campgrounds and recreation areas.
     const output=[...input];
-    for(let i=0;i<output.length;i++){
-      const r=output[i];
-      if(r.latitude!=null&&r.longitude!=null)continue;
-      try{
-        const q=encodeURIComponent(`${r.name}, United States`);
-        const response=await fetch(`https://api.mapbox.com/search/geocode/v6/forward?q=${q}&country=US&limit=1&types=poi,address,place&access_token=${mapboxToken}`);
-        if(response.ok){
-          const data=await response.json();const feature=data.features?.[0];const coords=feature?.geometry?.coordinates;
-          if(Array.isArray(coords)&&coords.length===2){
+    const todo=output.map((r,i)=>({r,i})).filter(x=>x.r.latitude==null||x.r.longitude==null);
+    let cursor=0;
+    async function worker(){
+      while(cursor<todo.length){
+        const {r,i}=todo[cursor++];
+        try{
+          const q=encodeURIComponent(r.name.slice(0,250));
+          const response=await fetch(`https://api.mapbox.com/search/searchbox/v1/forward?q=${q}&country=us&limit=1&types=poi,address,place,locality&access_token=${mapboxToken}`);
+          if(!response.ok)continue;
+          const data=await response.json();const coords=data.features?.[0]?.geometry?.coordinates;
+          if(Array.isArray(coords)&&coords.length===2&&Number.isFinite(coords[0])&&Number.isFinite(coords[1])){
             output[i]={...r,latitude:Number(coords[1]),longitude:Number(coords[0]),status:"ready"};
           }
-        }
-      }catch{}
+        }catch{}
+      }
     }
+    await Promise.all(Array.from({length:Math.min(5,todo.length)},worker));
     return output;
   }
 
   async function reverseGeocodeStates(input:ImportCandidate[],mapboxToken:string){
+    // State always comes from the final coordinates. Mapbox batch requests are
+    // capped at 50 queries. Reverse lookups take one type when limit is used, so
+    // try the state polygon first, then county (which also carries the state).
     const output=[...input];
-    const targets=input.map((r,index)=>({r,index})).filter(x=>x.r.latitude!=null&&x.r.longitude!=null);
-    for(let start=0;start<targets.length;start+=1000){
-      const chunk=targets.slice(start,start+1000);
-      try{
-        const body=chunk.map(({r})=>({
-          types:["region"],
-          longitude:r.longitude,
-          latitude:r.latitude,
-          country:"us",
-          limit:1
-        }));
-        const response=await fetch(`https://api.mapbox.com/search/geocode/v6/batch?access_token=${mapboxToken}`,{
-          method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)
-        });
-        if(!response.ok)continue;
-        const data=await response.json();
-        const results=Array.isArray(data.batch)?data.batch:[];
-        results.forEach((result:any,j:number)=>{
-          const target=chunk[j];
-          if(!target)return;
-          const feature=result?.features?.[0];
-          if(!feature)return;
-          const props=feature.properties||{};
-          const context=props.context||{};
-          const regionName=context.region?.name || props.name_preferred || props.name || "";
-          const shortCode=String(context.region?.short_code || props.short_code || "").toUpperCase();
-          const stateCode=shortCode.includes("-")?shortCode.split("-").pop()||"":shortCode;
-          const state=regionName && STATE_NAMES[regionName] ? regionName : (stateCode.length===2 ? Object.keys(STATE_NAMES).find(name=>STATE_NAMES[name]===stateCode) || "" : "");
-          output[target.index]={...output[target.index],state};
-        });
-      }catch{}
+    for(const type of ["region","district"]){
+      const targets=output.map((r,index)=>({r,index})).filter(x=>x.r.latitude!=null&&x.r.longitude!=null&&!x.r.state);
+      for(let start=0;start<targets.length;start+=50){
+        const chunk=targets.slice(start,start+50);
+        try{
+          const body=chunk.map(({r})=>({types:[type],longitude:r.longitude,latitude:r.latitude,limit:1}));
+          const response=await fetch(`https://api.mapbox.com/search/geocode/v6/batch?access_token=${mapboxToken}`,{
+            method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)
+          });
+          if(!response.ok)continue;
+          const data=await response.json();
+          (Array.isArray(data.batch)?data.batch:[]).forEach((result:any,j:number)=>{
+            const target=chunk[j];if(!target)return;
+            const state=stateFromFeature(result?.features?.[0]);
+            if(state)output[target.index]={...output[target.index],state};
+          });
+        }catch{}
+      }
     }
     return output;
   }
@@ -289,7 +287,7 @@ function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClo
       <div className="import-list">{rows.map(r=><div className={`import-row ${r.selected?"":"skipped"}`} key={r.key}>
         <div className="import-check"><input type="checkbox" checked={r.selected} onChange={e=>update(r.key,{selected:e.target.checked})}/></div>
         <div className="import-fields">
-          <div className="import-grid"><label>Name<input value={r.name} onChange={e=>update(r.key,{name:e.target.value})}/></label><label>Area / region<input value={r.area} onChange={e=>update(r.key,{area:e.target.value})}/></label><label>State<input value={r.state} readOnly placeholder="Auto from coordinates"/></label><label>Type<select value={r.type} onChange={e=>update(r.key,{type:e.target.value})}><option>Other</option><option>Dispersed</option><option>Developed</option><option>Forest campground</option><option>Private campground</option></select></label><label>Latitude<input type="number" step="any" value={r.latitude??""} onChange={e=>update(r.key,{latitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label><label>Longitude<input type="number" step="any" value={r.longitude??""} onChange={e=>update(r.key,{longitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label></div>
+          <div className="import-grid"><label>Name<input value={r.name} onChange={e=>update(r.key,{name:e.target.value})}/></label><label>Area / region<input value={r.area} onChange={e=>update(r.key,{area:e.target.value})}/></label><label>State<select value={r.state} onChange={e=>update(r.key,{state:e.target.value})}><option value="">Auto / unknown</option>{Object.keys(STATE_NAMES).map(n=><option key={n} value={n}>{n}</option>)}</select></label><label>Type<select value={r.type} onChange={e=>update(r.key,{type:e.target.value})}><option>Other</option><option>Dispersed</option><option>Developed</option><option>Forest campground</option><option>Private campground</option></select></label><label>Latitude<input type="number" step="any" value={r.latitude??""} onChange={e=>update(r.key,{latitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label><label>Longitude<input type="number" step="any" value={r.longitude??""} onChange={e=>update(r.key,{longitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label></div>
           <div className="import-meta"><span className={r.latitude!=null&&r.longitude!=null?"ready-text":"needs-text"}>{r.latitude!=null&&r.longitude!=null?"Location ready":"Location needed"}</span>{r.source_url&&<a href={r.source_url} target="_blank" rel="noreferrer">Open Google Maps ↗</a>}</div>
         </div>
         <button className="skip-button" onClick={()=>remove(r.key)}>Skip</button>
@@ -313,17 +311,6 @@ function parseCsv(text:string):Record<string,string>[]{
   if(rows.length<2)return [];
   const headers=rows[0].map(h=>h.trim().toLowerCase().replace(/^"|"$/g,""));
   return rows.slice(1).map(values=>Object.fromEntries(headers.map((h,i)=>[h,(values[i]??"").trim()])));
-}
-
-function extractGoogleCoordinates(url:string){
-  if(!url)return null;
-  const patterns=[
-    /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/,
-    /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/,
-    /[?&](?:query|q)=(-?\d+(?:\.\d+)?)[,%20]+(-?\d+(?:\.\d+)?)/
-  ];
-  for(const p of patterns){const m=url.match(p);if(m){const latitude=Number(m[1]),longitude=Number(m[2]);if(Math.abs(latitude)<=90&&Math.abs(longitude)<=180)return {latitude,longitude}}}
-  return null;
 }
 
 function isDuplicate(name:string,coords:{latitude:number;longitude:number}|null,existing:Campsite[]){
