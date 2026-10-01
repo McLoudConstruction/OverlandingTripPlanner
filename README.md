@@ -1,8 +1,10 @@
-# Overland Planner MVP 0.7.2
+# Overland Planner MVP 0.8.0
 
 Focused trip logistics app built around:
 - personal campsite library with List / Map views
-- trips made from saved campsite stops
+- trips planned by dates: a camp (plus any number of backups) for every night, stops along each day, a drive-hours cap and notes per day
+- click a campsite on the map for elevation, distance and drive time from the previous camp, and to pick its night
+- drag any day's route line to take a different road (shaping points never appear as stops)
 - Mapbox driving routes and gas-station discovery along the route
 - conservative route-driven fuel budgeting
 - EIA weekly retail gasoline pricing as the baseline
@@ -16,7 +18,7 @@ Focused trip logistics app built around:
 1. Run the original migrations if this is a new Supabase project:
    - `supabase/migrations/0001_overland_foundation.sql`
    - `supabase/migrations/0002_simplify_overland.sql`
-2. Run `supabase/migrations/0003_fuel_budget.sql`.
+2. Run `supabase/migrations/0003_fuel_budget.sql`, `0004_campsite_state.sql` and `0005_nights_and_days.sql`.
 3. Add these Vercel environment variables:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`

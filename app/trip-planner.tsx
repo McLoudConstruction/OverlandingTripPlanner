@@ -1,86 +1,132 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
-import TripMap, { type MapBounds } from "./trip-map";
-import type { FuelStation } from "@/lib/fuel";
+import TripMap, { type CampRole, type MapBounds, type MapCamp, type MapLeg, type MapVia } from "./trip-map";
+import { CampsiteCard, DayPanel, NightRail, TripSetup } from "./trip-parts";
+import { createClient } from "@/lib/supabase/client";
+import type { FuelStation, FuelStopPlan } from "@/lib/fuel";
+import { fetchDirections, geocodeText, haversineMiles, optimizeStopOrder, pointsKey, type PathPoint } from "@/lib/tripOrder";
 import {
-  DIRECTIONS_MAX_COORDS, cheapestInsertionIndex, fetchDirections, geocodeText, haversineMiles,
-  optimizeStopOrder, pointsKey, searchPlaces, stopsSaveKey, type PathPoint, type PlaceResult,
-} from "@/lib/tripOrder";
+  MAX_VIA_PER_LEG, addDayStop, aggregateRoutes, assignBackup, assignCamp, backupsAt, blankDay, buildLegs, campAt, dateRangeLabel,
+  effectiveCap, fetchLegRoute, firstFreeNight, fmtHrs, fmtMi, insertVia, isUnassigned, M_PER_MI, moveDayStop, nextCamp, nightsBetween,
+  nightsOfCampsite, previousPoint, promoteBackup, removeStopRef, renumber, sameStop, trimToNights, unassignedStops,
+  type DayInfo, type DayRun, type PlanStop, type Preview, type TripCampsite, type TripMeta,
+} from "@/lib/tripPlan";
 
-export type TripStop = {
-  id?: string; name: string; latitude: number; longitude: number;
-  campsite_id?: string; stop_order: number; notes?: string;
-};
-export type TripCampsite = {
-  id: string; name: string; area: string; state: string; type: string; latitude: number; longitude: number;
-  cost: number | null; reservation: string; rating: number | null; favorite: boolean;
-  notes: string; source: string; source_url: string; last_verified_at: string | null;
-};
+export type TripStop = PlanStop;
+export type { TripCampsite };
 
 type Props = {
-  tripName: string;
+  trip: TripMeta;
+  updateTrip: (patch: Record<string, any>) => Promise<boolean>;
   startText: string;
   setStartText: (t: string) => void;
   startPoint: PathPoint | null;
   setStartPoint: (p: PathPoint | null) => void;
   commitStart: (text: string) => void;
-  stops: TripStop[];
-  setStops: React.Dispatch<React.SetStateAction<TripStop[]>>;
+  stops: PlanStop[];
+  setStops: React.Dispatch<React.SetStateAction<PlanStop[]>>;
   campsites: TripCampsite[];
-  route: any;
-  setRoute: (r: any) => void;
+  hasRoute: boolean;
   routeKey: string;
+  setRoute: (r: any) => void;
   setRouteKey: (k: string) => void;
+  setRouteWaypoints: (w: PathPoint[]) => void;
   clearFuel: () => void;
   persistStops: (silent?: boolean) => Promise<void>;
   calculateRoute: () => Promise<void>;
   routeLoading: boolean;
   fuelStations: FuelStation[];
-  fuelStopPlan: any;
+  fuelStopPlan: FuelStopPlan | null;
   setMessage: (m: string) => void;
   openEditCampsite: (c: TripCampsite) => void;
   goTab: (t: string) => void;
 };
 
-const MI = 1609.344;
-const mi = (n: number) => Math.round(n).toLocaleString();
-const hrs = (sec: number) => {
-  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
-  return h ? `${h} h ${m} min` : `${m} min`;
-};
-const withPlace = (p: PlaceResult) =>
-  p.subtitle && !p.name.toLowerCase().includes(p.subtitle.toLowerCase()) ? `${p.name}, ${p.subtitle}` : p.name;
-
 export default function TripPlanner(props: Props) {
-  const {
-    startText, setStartText, startPoint, setStartPoint, stops, setStops, campsites, route, setRoute,
-    routeKey, setRouteKey, clearFuel, persistStops, setMessage,
-  } = props;
+  const { trip, stops, setStops, campsites, startPoint, setStartPoint, startText, setStartText, setMessage } = props;
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
+  const nights = nightsBetween(trip.start_date, trip.end_date);
+  const [editingSetup, setEditingSetup] = useState(false);
+  const needsSetup = nights < 1 || editingSetup;
 
-  const [step, setStep] = useState<1 | 2>(1);
-  const [autoOrder, setAutoOrder] = useState(true);
-  const [optimizing, setOptimizing] = useState(false);
-  const [orderMethod, setOrderMethod] = useState<"road" | "distance" | null>(null);
-  const [routeBusy, setRouteBusy] = useState(false);
-  const [routeError, setRouteError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [bounds, setBounds] = useState<MapBounds | null>(null);
-  const [fitSignal, setFitSignal] = useState(0);
-  const [flyTo, setFlyTo] = useState<{ longitude: number; latitude: number; nonce: number } | null>(null);
-  const reqId = useRef(0);
-  const fitAfterRoute = useRef(true);
-  const flyNonce = useRef(0);
+  // ------------------------------------------------------------ per-day data
+  const [days, setDays] = useState<Record<number, DayInfo>>({});
+  const [daysLoaded, setDaysLoaded] = useState(false);
+  const savedDays = useRef("");
+  const dayChain = useRef<Promise<void>>(Promise.resolve());
 
-  const points = useMemo(() => [...(startPoint ? [startPoint] : []), ...stops], [startPoint, stops]);
-  const key = useMemo(() => pointsKey(points), [points]);
-  const routeInSync = !!route && routeKey === key;
-  const tripCampsiteIds = useMemo(
-    () => new Set(stops.map((s) => s.campsite_id).filter(Boolean) as string[]),
-    [stops]
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const { data, error } = await createClient().from("trip_days").select("day_number,max_hours,notes,via").eq("trip_id", trip.id);
+      if (!alive) return;
+      if (error) { setMessage(`Could not load the day settings (${error.message}). Run migration 0005 in Supabase.`); return; }
+      const map: Record<number, DayInfo> = {};
+      ((data || []) as any[]).forEach((r) => {
+        map[r.day_number] = {
+          day_number: r.day_number,
+          max_hours: r.max_hours == null ? null : Number(r.max_hours),
+          notes: r.notes || "",
+          via: Array.isArray(r.via) ? r.via.filter((v: any) => Array.isArray(v) && v.length === 2).map((v: any) => [Number(v[0]), Number(v[1])]) : [],
+        };
+      });
+      const kept = Object.values(map).filter((d) => d.max_hours != null || d.notes.trim() || d.via.length).sort((a, b) => a.day_number - b.day_number);
+      savedDays.current = JSON.stringify(kept);
+      setDays(map);
+      setDaysLoaded(true);
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trip.id]);
+
+  const daysPayload = useMemo(
+    () => Object.values(days)
+      .filter((d) => d.day_number >= 1 && d.day_number <= nights + 1 && (d.max_hours != null || d.notes.trim() || d.via.length))
+      .sort((a, b) => a.day_number - b.day_number),
+    [days, nights]
   );
+  const daysKey = JSON.stringify(daysPayload);
+  const latestDays = useRef({ payload: daysPayload, key: daysKey, loaded: false });
+  latestDays.current = { payload: daysPayload, key: daysKey, loaded: daysLoaded };
 
-  // ---- restore the saved start location's coordinates
+  function flushDays() {
+    const { payload, key, loaded } = latestDays.current;
+    if (!loaded || key === savedDays.current) return;
+    dayChain.current = dayChain.current.then(async () => {
+      const sb = createClient();
+      const del = await sb.from("trip_days").delete().eq("trip_id", trip.id);
+      if (del.error) { setMessage(del.error.message); return; }
+      if (payload.length) {
+        const { error } = await sb.from("trip_days").insert(
+          payload.map((d) => ({ trip_id: trip.id, day_number: d.day_number, max_hours: d.max_hours, notes: d.notes, via: d.via }))
+        );
+        if (error) { setMessage(error.message); return; }
+      }
+      savedDays.current = key;
+    });
+  }
+  useEffect(() => {
+    if (!daysLoaded || daysKey === savedDays.current) return;
+    const t = setTimeout(flushDays, 900);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [daysKey, daysLoaded]);
+
+  const setDayInfo = (day: number, patch: Partial<DayInfo>) =>
+    setDays((d) => ({ ...d, [day]: { ...(d[day] || blankDay(day)), ...patch } }));
+
+  // Stops autosave shortly after they change; both saves also flush when leaving the screen.
+  const saveKey = useMemo(() => stops.map((s) => `${s.campsite_id || ""}|${s.latitude}|${s.longitude}|${s.kind}|${s.night ?? ""}|${s.day_number ?? ""}`).join("~"), [stops]);
+  const persistRef = useRef(props.persistStops);
+  persistRef.current = props.persistStops;
+  useEffect(() => {
+    const t = setTimeout(() => { persistRef.current(true); }, 1200);
+    return () => clearTimeout(t);
+  }, [saveKey]);
+  useEffect(() => () => { persistRef.current(true); flushDays(); }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+
+  // ----------------------------------------------------------- start and end
   const triedStart = useRef("");
   useEffect(() => {
     const text = startText.trim();
@@ -90,125 +136,295 @@ export default function TripPlanner(props: Props) {
     geocodeText(text, token).then((p) => {
       if (!alive) return;
       if (p) setStartPoint(p);
-      else setMessage(`Could not locate the starting point "${text}". Search for it again in Step 1.`);
+      else setMessage(`Could not locate the starting point "${text}". Search for it again under Edit trip.`);
     });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startText, startPoint, token]);
 
-  // ---- keep the driving route in sync with the ordered stops
+  const endText = trip.end_location || "";
+  const [endGeo, setEndGeo] = useState<PathPoint | null>(null);
   useEffect(() => {
-    if (!token) return;
-    if (points.length < 2) {
-      setRouteBusy(false);
-      setRouteError(null);
-      if (route) { setRoute(null); setRouteKey(""); clearFuel(); }
-      return;
-    }
-    if (key === routeKey) { setRouteBusy(false); return; }
-    const ctrl = new AbortController();
-    setRouteBusy(true);
-    const t = setTimeout(async () => {
-      const { route: r, error } = await fetchDirections(points, token, ctrl.signal);
-      if (ctrl.signal.aborted) return;
-      setRouteBusy(false);
-      if (error) { setRouteError(error); return; }
-      setRouteError(null);
-      setRoute(r);
-      setRouteKey(key);
-      clearFuel(); // fuel stops belong to the old route
-      if (fitAfterRoute.current) setFitSignal((n) => n + 1);
-    }, 500);
-    return () => { clearTimeout(t); ctrl.abort(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, token]);
+    if (!token || !endText) { setEndGeo(null); return; }
+    let alive = true;
+    geocodeText(endText, token).then((p) => { if (alive) setEndGeo(p); });
+    return () => { alive = false; };
+  }, [endText, token]);
+  const endPoint: PathPoint | null = endText ? endGeo : startPoint;
+  const mapEnd = useMemo(
+    () => (endText && endGeo ? { name: endText, latitude: endGeo.latitude, longitude: endGeo.longitude } : null),
+    [endText, endGeo]
+  );
 
-  // ---- autosave stops shortly after they change
-  const saveKey = stopsSaveKey(stops);
-  useEffect(() => {
-    const t = setTimeout(() => { persistStops(true); }, 1200);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [saveKey]);
-
-  // ---- ordering
-  async function optimize(list: TripStop[], start: PathPoint | null) {
-    const id = ++reqId.current;
-    setOptimizing(true);
-    const { ordered, method } = await optimizeStopOrder(start, list, token);
-    if (id !== reqId.current) return; // a newer edit superseded this one
-    setStops(ordered.map((s, i) => ({ ...s, stop_order: i })));
-    setOrderMethod(method);
-    setOptimizing(false);
-  }
-
-  function renumber(list: TripStop[]) {
-    return list.map((s, i) => ({ ...s, stop_order: i }));
-  }
-
-  function addStop(p: { name: string; latitude: number; longitude: number; campsite_id?: string }, fromMap: boolean) {
-    if (p.campsite_id && stops.some((s) => s.campsite_id === p.campsite_id)) {
-      setMessage(`${p.name} is already on this trip.`);
-      return;
-    }
-    if (points.length >= DIRECTIONS_MAX_COORDS) {
-      setMessage(`A trip can have at most ${DIRECTIONS_MAX_COORDS - 1} stops including the start.`);
-      return;
-    }
-    reqId.current++;
-    const idx = cheapestInsertionIndex(startPoint, stops, p);
-    const next = renumber([...stops.slice(0, idx), { ...p, stop_order: idx }, ...stops.slice(idx)]);
-    setStops(next); // show it immediately in the cheapest slot
-    fitAfterRoute.current = !fromMap; // do not move the map while picking campsites
-    if (autoOrder) optimize(next, startPoint);
-  }
-
-  function removeStop(i: number) {
-    reqId.current++;
-    setOptimizing(false);
-    fitAfterRoute.current = false;
-    setStops(renumber(stops.filter((_, idx) => idx !== i)));
-  }
-
-  function moveStop(from: number, to: number) {
-    if (from === to || from < 0 || to < 0 || from >= stops.length || to >= stops.length) return;
-    reqId.current++;
-    setOptimizing(false);
-    const next = [...stops];
-    const [item] = next.splice(from, 1);
-    next.splice(to, 0, item);
-    setStops(renumber(next));
-    fitAfterRoute.current = false;
-    if (autoOrder) setAutoOrder(false); // the person's manual order wins
-  }
-
-  function chooseStart(text: string, p: PathPoint) {
+  function chooseStart(text: string, p: { latitude: number; longitude: number }) {
     triedStart.current = text;
     setStartText(text);
-    setStartPoint({ ...p, name: text });
+    setStartPoint({ name: text, latitude: p.latitude, longitude: p.longitude });
     props.commitStart(text);
-    fitAfterRoute.current = true;
-    if (autoOrder && stops.length > 1) optimize(stops, { ...p, name: text });
   }
-
   function clearStart() {
     setStartText("");
     setStartPoint(null);
     props.commitStart("");
   }
 
-  function reoptimize() {
-    setAutoOrder(true);
-    fitAfterRoute.current = true;
-    optimize(stops, startPoint);
+  // ------------------------------------------------------------------ routes
+  // Shaping points only matter to routing, so legs are rebuilt when they change, not on every note keystroke.
+  const viaKey = JSON.stringify(Object.values(days).map((d) => [d.day_number, d.via]));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const viaDays = useMemo(() => days, [viaKey]);
+  const legs = useMemo(
+    () => buildLegs({ nights, start: startPoint, end: endPoint, stops, days: viaDays }),
+    [nights, startPoint, endPoint, stops, viaDays]
+  );
+  const syncKey = useMemo(() => legs.map((l) => l.key).join("#"), [legs]);
+
+  const [legRoutes, setLegRoutes] = useState<Record<string, any>>({});
+  const [routeError, setRouteError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!token) return;
+    const need = legs.filter((l) => !(l.key in legRoutes));
+    if (!need.length) { setRouteError(null); return; }
+    const ctrl = new AbortController();
+    const t = setTimeout(async () => {
+      const results = await Promise.all(need.map(async (l) => ({ l, ...(await fetchLegRoute(l, token, ctrl.signal)) })));
+      if (ctrl.signal.aborted) return;
+      const add: Record<string, any> = {};
+      let err: string | null = null;
+      for (const r of results) { if (r.route) add[r.l.key] = r.route; else if (r.error) err = r.error; }
+      setLegRoutes((prev) => ({ ...prev, ...add }));
+      setRouteError(err);
+    }, 450);
+    return () => { clearTimeout(t); ctrl.abort(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncKey, token]);
+
+  const routeBusy = legs.some((l) => !legRoutes[l.key]) && !routeError;
+  const tripRoute = useMemo(() => aggregateRoutes(legs, legs.map((l) => legRoutes[l.key] || null)), [legs, legRoutes]);
+
+  // Hand the joined route to the fuel planner whenever it is complete.
+  const published = useRef("");
+  useEffect(() => {
+    if (tripRoute) {
+      props.setRoute(tripRoute.route);
+      props.setRouteKey(syncKey);
+      props.setRouteWaypoints(tripRoute.waypoints);
+      published.current = syncKey;
+      if (props.routeKey !== syncKey) props.clearFuel(); // fuel stops belong to the old route
+    } else if (published.current) {
+      published.current = "";
+      props.setRoute(null);
+      props.setRouteKey("");
+      props.setRouteWaypoints([]);
+      props.clearFuel();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripRoute, syncKey]);
+
+  // Per-day figures, available as each leg finishes (the fuel mileposts need the joined route).
+  const runs = useMemo(() => {
+    const out: Record<number, DayRun> = {};
+    let mile = 0;
+    for (const l of legs) {
+      const r = legRoutes[l.key];
+      if (!r) continue;
+      const miles = (r.distance || 0) / M_PER_MI;
+      out[l.day] = { day: l.day, startMile: mile, endMile: mile + miles, distance: r.distance || 0, duration: r.duration || 0 };
+      mile += miles;
+    }
+    return out;
+  }, [legs, legRoutes]);
+
+  // Lines on the map. A day keeps its previous line while a new one is on the way, so edits never blink the route away.
+  const lastGeom = useRef(new Map<number, number[][]>());
+  const mapLegs: MapLeg[] = useMemo(() => {
+    const out: MapLeg[] = [];
+    const keep = new Set<number>();
+    for (const l of legs) {
+      keep.add(l.day);
+      const coords = legRoutes[l.key]?.geometry?.coordinates as number[][] | undefined;
+      if (coords && coords.length > 1) lastGeom.current.set(l.day, coords);
+      const use = lastGeom.current.get(l.day);
+      if (use) out.push({ day: l.day, coordinates: use });
+    }
+    for (const k of Array.from(lastGeom.current.keys())) if (!keep.has(k)) lastGeom.current.delete(k);
+    return out;
+  }, [legs, legRoutes]);
+
+  const mapVias: MapVia[] = useMemo(
+    () => mapLegs.flatMap((l) => (viaDays[l.day]?.via || []).map((v, i) => ({ day: l.day, idx: i, lng: v[0], lat: v[1] }))),
+    [mapLegs, viaDays]
+  );
+
+  const [fitSignal, setFitSignal] = useState(0);
+  const fittedOnce = useRef(false);
+  useEffect(() => {
+    if (tripRoute && !fittedOnce.current) { fittedOnce.current = true; setFitSignal((n) => n + 1); }
+  }, [tripRoute]);
+
+  // ----------------------------------------------------- shaping the route
+  function shapeRoute(day: number, seg: number, pt: [number, number]) {
+    const leg = mapLegs.find((l) => l.day === day);
+    if (!leg) return;
+    if ((days[day]?.via.length || 0) >= MAX_VIA_PER_LEG) {
+      setMessage(`A day can have up to ${MAX_VIA_PER_LEG} shaping points. Reset that day's route to start over.`);
+      return;
+    }
+    setDays((d) => {
+      const cur = d[day] || blankDay(day);
+      return { ...d, [day]: { ...cur, via: insertVia(cur.via, leg.coordinates, seg, pt) } };
+    });
+  }
+  const moveVia = (day: number, idx: number, pt: [number, number]) =>
+    setDays((d) => {
+      const cur = d[day] || blankDay(day);
+      return { ...d, [day]: { ...cur, via: cur.via.map((v, i) => (i === idx ? pt : v)) } };
+    });
+  const removeVia = (day: number, idx: number) =>
+    setDays((d) => {
+      const cur = d[day] || blankDay(day);
+      return { ...d, [day]: { ...cur, via: cur.via.filter((_, i) => i !== idx) } };
+    });
+
+  // --------------------------------------------------------------- selection
+  const [activeDay, setActiveDay] = useState(1);
+  const day = Math.min(Math.max(activeDay, 1), nights + 1);
+  const activeNight = day <= nights ? day : firstFreeNight(stops, nights) ?? 1;
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [cardNight, setCardNight] = useState(1);
+  const [bounds, setBounds] = useState<MapBounds | null>(null);
+  const [flyTo, setFlyTo] = useState<{ longitude: number; latitude: number; nonce: number; offsetCard?: boolean } | null>(null);
+  const flyNonce = useRef(0);
+  const selected = campsites.find((c) => c.id === selectedId) || null;
+
+  function selectCampsite(id: string | null) {
+    setSelectedId(id);
+    if (id) {
+      const mine = nightsOfCampsite(stops, id);
+      setCardNight(mine.camp[0] ?? mine.backup[0] ?? activeNight);
+    }
+  }
+  function pickCampsite(c: TripCampsite) {
+    selectCampsite(c.id);
+    setFlyTo({ longitude: c.longitude, latitude: c.latitude, nonce: ++flyNonce.current, offsetCard: true });
+  }
+  function flyToPoint(p: { longitude: number; latitude: number }) {
+    setFlyTo({ longitude: p.longitude, latitude: p.latitude, nonce: ++flyNonce.current });
+  }
+  function pickDay(d: number) {
+    setActiveDay(d);
+    const c = d <= nights ? campAt(stops, d) : null;
+    if (c) flyToPoint(c);
+    else if (d === nights + 1 && endPoint) flyToPoint(endPoint);
+  }
+  function focusStop(s: PlanStop) {
+    const site = s.campsite_id ? campsites.find((c) => c.id === s.campsite_id) : undefined;
+    if (site) pickCampsite(site);
+    else flyToPoint(s);
   }
 
-  function toggleAuto(on: boolean) {
-    if (on) reoptimize();
-    else { reqId.current++; setOptimizing(false); setAutoOrder(false); }
-  }
+  // ------------------------------------------------- "from previous" preview
+  const [preview, setPreview] = useState<Preview>({ status: "idle", fromLabel: "start" });
+  const previewCache = useRef(new Map<string, { distance: number; duration: number }>());
+  const prevInfo = useMemo(() => (selected ? previousPoint(stops, cardNight, startPoint) : null), [selected, stops, cardNight, startPoint]);
+  const nextInfo = useMemo(() => (selected ? nextCamp(stops, cardNight, nights) : null), [selected, stops, cardNight, nights]);
+  useEffect(() => {
+    if (!selected || !prevInfo) { setPreview({ status: "idle", fromLabel: "start" }); return; }
+    if (!prevInfo.point) { setPreview({ status: "nostart", fromLabel: "start" }); return; }
+    if (!token) { setPreview({ status: "error", fromLabel: prevInfo.label }); return; }
+    const from = prevInfo.point, label = prevInfo.label;
+    const ctrl = new AbortController();
+    setPreview({ status: "loading", fromLabel: label });
+    const get = async (a: PathPoint, b: PathPoint) => {
+      if (haversineMiles(a, b) < 0.03) return { distance: 0, duration: 0 };
+      const k = pointsKey([a, b]);
+      const hit = previewCache.current.get(k);
+      if (hit) return hit;
+      const { route } = await fetchDirections([a, b], token, ctrl.signal);
+      if (!route) return null;
+      const v = { distance: route.distance as number, duration: route.duration as number };
+      previewCache.current.set(k, v);
+      return v;
+    };
+    (async () => {
+      const main = await get(from, selected);
+      const nxt = nextInfo ? await get(selected, nextInfo.stop) : null;
+      if (ctrl.signal.aborted) return;
+      if (!main) { setPreview({ status: "error", fromLabel: label }); return; }
+      setPreview({
+        status: "ready", fromLabel: label, distance: main.distance, duration: main.duration,
+        next: nxt && nextInfo ? { label: `Night ${nextInfo.night} camp`, distance: nxt.distance, duration: nxt.duration } : null,
+      });
+    })();
+    return () => ctrl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, prevInfo?.point?.latitude, prevInfo?.point?.longitude, nextInfo?.stop.latitude, nextInfo?.stop.longitude, token]);
 
-  // ---- campsites in the current map view
+  // ------------------------------------------------------- camp assignments
+  const campInput = (c: TripCampsite) => ({ name: c.name, latitude: c.latitude, longitude: c.longitude, campsite_id: c.id });
+  function makeCamp(c: TripCampsite, night: number) {
+    const r = assignCamp(stops, campInput(c), night);
+    setStops(r.stops);
+    setActiveDay(night);
+    setMessage(r.displaced ? `${c.name} is now Night ${night}'s camp. ${r.displaced.name} stays as a backup.` : `${c.name} is Night ${night}'s camp.`);
+  }
+  const removeCamp = (c: TripCampsite, night: number) =>
+    setStops((prev) => renumber(prev.filter((s) => !(s.campsite_id === c.id && s.kind === "camp" && s.night === night))));
+  const addBackup = (c: TripCampsite, night: number) => setStops((prev) => assignBackup(prev, campInput(c), night));
+  const removeBackup = (c: TripCampsite, night: number) =>
+    setStops((prev) => renumber(prev.filter((s) => !(s.campsite_id === c.id && s.kind === "backup" && s.night === night))));
+
+  // Camps with no night (older trips, or added from the library).
+  const unassigned = useMemo(() => unassignedStops(stops), [stops]);
+  const [ordering, setOrdering] = useState(false);
+  async function orderAndFill() {
+    if (!unassigned.length) return;
+    setOrdering(true);
+    const { ordered } = await optimizeStopOrder(startPoint, unassigned, token);
+    setStops((prev) => {
+      const next = [...prev];
+      for (const o of ordered) {
+        const i = next.findIndex((s) => sameStop(s, o));
+        const n = firstFreeNight(next, nights);
+        if (i >= 0 && n != null) next[i] = { ...next[i], night: n };
+      }
+      return renumber(next);
+    });
+    setOrdering(false);
+  }
+  const assignUnassigned = (s: PlanStop, night: number) =>
+    setStops((prev) => (s.campsite_id
+      ? assignCamp(prev, { name: s.name, latitude: s.latitude, longitude: s.longitude, campsite_id: s.campsite_id }, night).stops
+      : prev.map((x) => (x === s ? { ...x, night } : x))));
+
+  // ------------------------------------------------------------- map inputs
+  const roles = useMemo(() => {
+    const r: Record<string, CampRole> = {};
+    for (const s of stops) {
+      if (!s.campsite_id || s.kind === "daystop") continue;
+      const e = r[s.campsite_id] || (r[s.campsite_id] = { camp: [], backup: [] });
+      if (s.kind === "camp") e.camp.push(s.night ?? 0); // 0 = on the trip but no night yet
+      else if (s.night != null) e.backup.push(s.night);
+    }
+    return r;
+  }, [stops]);
+
+  const badges: MapCamp[] = useMemo(() => {
+    const m = new Map<string, MapCamp>();
+    for (const s of stops) {
+      if (s.kind !== "camp" || s.night == null) continue;
+      const k = `${s.campsite_id || s.name}|${s.latitude}|${s.longitude}`;
+      const e = m.get(k);
+      if (e) e.nights.push(s.night);
+      else m.set(k, { nights: [s.night], name: s.name, latitude: s.latitude, longitude: s.longitude });
+    }
+    return Array.from(m.values()).map((e) => ({ ...e, nights: e.nights.sort((a, b) => a - b) }));
+  }, [stops]);
+  const mapDayStops = useMemo(
+    () => stops.filter((s) => s.kind === "daystop" && s.day_number != null).map((s) => ({ day: s.day_number as number, name: s.name, latitude: s.latitude, longitude: s.longitude })),
+    [stops]
+  );
+
   const visibleCampsites = useMemo(() => {
     if (!bounds) return [];
     const cLng = (bounds.west + bounds.east) / 2, cLat = (bounds.south + bounds.north) / 2;
@@ -219,327 +435,190 @@ export default function TripPlanner(props: Props) {
       .map((x) => x.c);
   }, [campsites, bounds]);
 
-  const selected = campsites.find((c) => c.id === selectedId) || null;
+  // --------------------------------------------------------------- summaries
+  const tripCap = trip.daily_driving_hours && trip.daily_driving_hours > 0 ? Number(trip.daily_driving_hours) : null;
+  const capFor = (d: number) => effectiveCap(days[d], tripCap);
+  const overCap = useMemo(() => {
+    const s = new Set<number>();
+    for (const r of Object.values(runs)) { const cap = effectiveCap(days[r.day], tripCap); if (cap != null && r.duration / 3600 > cap) s.add(r.day); }
+    return s;
+  }, [runs, days, tripCap]);
+  const campCost = useMemo(() => {
+    let total = 0, any = false;
+    for (let n = 1; n <= nights; n++) {
+      const c = campAt(stops, n);
+      const site = c?.campsite_id ? campsites.find((x) => x.id === c.campsite_id) : undefined;
+      if (site?.cost != null) { total += site.cost; any = true; }
+    }
+    return any ? total : null;
+  }, [stops, campsites, nights]);
+  const filled = useMemo(() => Array.from({ length: nights }, (_, i) => i + 1).filter((n) => campAt(stops, n)).length, [stops, nights]);
 
-  function pickCampsite(c: TripCampsite) {
-    setSelectedId(c.id);
-    setFlyTo({ longitude: c.longitude, latitude: c.latitude, nonce: ++flyNonce.current });
+  // ------------------------------------------------------------------- setup
+  async function saveSetup(patch: { name: string; start_date: string; end_date: string; end_location: string | null; daily_driving_hours: number | null }) {
+    const newNights = nightsBetween(patch.start_date, patch.end_date);
+    const ok = await props.updateTrip(patch);
+    if (!ok) return;
+    if (newNights !== nights) setStops((prev) => trimToNights(prev, newNights));
+    setEditingSetup(false);
+    setActiveDay(1);
+    setFitSignal((n) => n + 1);
   }
 
-  function addCampsite(c: TripCampsite) {
-    addStop({ name: c.name, latitude: c.latitude, longitude: c.longitude, campsite_id: c.id }, true);
+  if (needsSetup) {
+    return (
+      <section className="content trip-screen">
+        <div className="page-head">
+          <div>
+            <span className="eyebrow">TRIP</span>
+            <h1>{trip.name}</h1>
+            <p>{nights < 1 ? "Set the dates first. They decide how many nights you plan, and each night gets its own camp." : "Change the dates, start, end or daily drive cap."}</p>
+          </div>
+        </div>
+        <TripSetup
+          trip={trip} token={token} startText={startText} firstTime={nights < 1}
+          onPickStart={(text, p) => chooseStart(text, p)} onClearStart={clearStart}
+          onSave={saveSetup} onCancel={nights >= 1 ? () => setEditingSetup(false) : undefined}
+        />
+      </section>
+    );
   }
 
-  function removeCampsite(c: TripCampsite) {
-    const i = stops.findIndex((s) => s.campsite_id === c.id);
-    if (i >= 0) removeStop(i);
-  }
-
-  function useAsStart(c: TripCampsite) {
-    chooseStart(c.name, { name: c.name, latitude: c.latitude, longitude: c.longitude });
-  }
-
-  const summary = routeInSync ? (
-    <span className="trip-summary">
-      <b>{mi(route.distance / MI)} mi</b> · {hrs(route.duration)} drive · {stops.length} stop{stops.length === 1 ? "" : "s"}
-    </span>
-  ) : routeBusy || optimizing ? (
-    <span className="trip-summary muted">{optimizing ? "Finding the most efficient order…" : "Updating route…"}</span>
-  ) : (
-    <span className="trip-summary muted">{points.length < 2 ? "Add a start and at least one destination to build the route." : ""}</span>
-  );
-
-  const mapProps = {
-    campsites, tripCampsiteIds, selectedId, onSelect: setSelectedId, onBoundsChange: setBounds,
-    start: startPoint, stops, route: routeInSync ? route : null, fuelStations: props.fuelStations, fitSignal, flyTo,
-  };
+  const leg = legs.find((l) => l.day === day);
+  const run = runs[day];
+  const totalRun = tripRoute ? tripRoute.route : null;
+  const prevForSearch = (() => {
+    if (day > nights) return endPoint;
+    return previousPoint(stops, day, startPoint).point;
+  })();
 
   return (
     <section className="content trip-screen">
       <div className="page-head">
         <div>
           <span className="eyebrow">TRIP</span>
-          <h1>{props.tripName}</h1>
-          <p>Set your start and destinations, then pick campsites from your saved map.</p>
+          <h1>{trip.name}</h1>
+          <p className="trip-meta">
+            {dateRangeLabel(trip.start_date, trip.end_date)} · <b>{nights}</b> night{nights === 1 ? "" : "s"} ·{" "}
+            {startText || "No start set"} → {trip.end_location || "back to start"}
+            {campCost != null ? ` · camping about $${Math.round(campCost).toLocaleString()}` : ""}
+          </p>
+        </div>
+        <div className="page-head-actions">
+          <button className="secondary" onClick={() => setFitSignal((n) => n + 1)}>Fit trip</button>
+          <button className="secondary" onClick={() => setEditingSetup(true)}>Edit trip</button>
         </div>
       </div>
 
-      <ol className="stepper">
-        <li><button className={step === 1 ? "step active" : "step"} onClick={() => setStep(1)}><b>1</b> Destinations &amp; route</button></li>
-        <li><button className={step === 2 ? "step active" : "step"} onClick={() => setStep(2)}><b>2</b> Pick campsites on the map</button></li>
-      </ol>
-
       {routeError && <div className="warning-box">{routeError}</div>}
+      {!startPoint && <div className="warning-box">Set a starting location (Edit trip) to see drive times and distances.</div>}
 
-      {/* One map instance is shared by both steps so switching steps never reloads it. */}
-      <div className={`trip-body step-${step}`}>
-        {step === 1 ? (
-          <div className="trip-panel">
-            <h3>Starting location</h3>
-            <PlaceSearch
-              token={token} placeholder="Where does the trip start?" proximity={null} campsites={[]}
-              defaultText={startText}
-              onPickPlace={(p) => chooseStart(withPlace(p), { name: withPlace(p), latitude: p.latitude, longitude: p.longitude })}
-              onClear={clearStart}
-            />
-            {startText && !startPoint && <small className="muted">Locating {startText}…</small>}
+      <NightRail nights={nights} startDate={trip.start_date} stops={stops} activeDay={day} overCap={overCap} onPick={pickDay} />
 
-            <h3>Destinations</h3>
-            <PlaceSearch
-              token={token} placeholder="Add a destination, park, town or saved campsite" proximity={startPoint}
-              campsites={campsites} clearOnPick
-              onPickPlace={(p) => addStop({ name: p.name, latitude: p.latitude, longitude: p.longitude }, false)}
-              onPickCampsite={(c) => addStop({ name: c.name, latitude: c.latitude, longitude: c.longitude, campsite_id: c.id }, false)}
-            />
-
-            <div className="order-bar">
-              <label className="check">
-                <input type="checkbox" checked={autoOrder} onChange={(e) => toggleAuto(e.target.checked)} />
-                Automatically order for the most efficient drive
-              </label>
-              {!autoOrder && stops.length > 1 && <button className="secondary" onClick={reoptimize}>Re-optimize order</button>}
-            </div>
-            {orderMethod === "distance" && autoOrder && (
-              <small className="muted">Drive times were unavailable, so stops were ordered by straight-line distance.</small>
+      <div className="trip-body workspace">
+        <div className="trip-map">
+          <TripMap
+            campsites={campsites} roles={roles} selectedId={selectedId} onSelect={selectCampsite} onBoundsChange={setBounds}
+            start={startPoint} end={mapEnd} camps={badges} dayStops={mapDayStops} legs={mapLegs} vias={mapVias} activeDay={day}
+            onNightClick={(n) => pickDay(n)} onShape={shapeRoute} onMoveVia={moveVia} onRemoveVia={removeVia}
+            fuelStations={props.fuelStations} fitSignal={fitSignal} flyTo={flyTo}
+            anchor={selected ? { longitude: selected.longitude, latitude: selected.latitude } : null}
+          >
+            {selected && (
+              <CampsiteCard
+                c={selected} nights={nights} startDate={trip.start_date} stops={stops} night={cardNight} setNight={setCardNight}
+                preview={preview} cap={capFor(cardNight)}
+                onMakeCamp={() => makeCamp(selected, cardNight)} onRemoveCamp={() => removeCamp(selected, cardNight)}
+                onAddBackup={() => addBackup(selected, cardNight)} onRemoveBackup={() => removeBackup(selected, cardNight)}
+                onStart={() => chooseStart(selected.name, selected)} onEdit={() => props.openEditCampsite(selected)}
+                onClose={() => setSelectedId(null)}
+              />
             )}
+          </TripMap>
+        </div>
 
-            <StopList
-              stops={stops} startText={startPoint ? startText : ""} legs={routeInSync ? route.legs : null}
-              hasStart={!!startPoint} onMove={moveStop} onRemove={removeStop}
-            />
-            {!stops.length && <div className="empty">No destinations yet. Search above to add your first one.</div>}
-            {stops.length > 1 && <small className="muted">Drag stops (or use the arrows) to change the order. Editing the order turns automatic ordering off.</small>}
-            <div className="trip-summary-row">{summary}</div>
-          </div>
+        <aside className="pick-sidebar">
+          <DayPanel
+            key={day}
+            day={day} nights={nights} startDate={trip.start_date} dayInfo={days[day] || blankDay(day)}
+            setDayInfo={(patch) => setDayInfo(day, patch)} stops={stops} campsites={campsites} leg={leg} run={run}
+            routeBusy={routeBusy} tripCap={tripCap} fuelPlan={props.fuelStopPlan} proximity={prevForSearch} token={token}
+            onResetRoute={() => setDayInfo(day, { via: [] })}
+            onPromote={(s) => setStops((prev) => promoteBackup(prev, s))}
+            onRemove={(s) => setStops((prev) => removeStopRef(prev, s))}
+            onAddDayStop={(p) => setStops((prev) => addDayStop(prev, day, p))}
+            onMoveDayStop={(s, dir) => setStops((prev) => moveDayStop(prev, s, dir))}
+            onFocus={focusStop}
+          />
 
-        ) : (
-          <div className="trip-stops-above">
-            <div className="section-title">
-              <div><span className="eyebrow">ADDED TO THIS TRIP</span><h2>Trip stops</h2></div>
-              {summary}
-            </div>
-            <StopList
-              compact stops={stops} startText={startPoint ? startText : ""} legs={routeInSync ? route.legs : null}
-              hasStart={!!startPoint} onMove={moveStop} onRemove={removeStop}
-            />
-            {!stops.length && <div className="empty">Nothing added yet. Click a saved campsite on the map, then add it.</div>}
-            {!autoOrder && stops.length > 1 && (
-              <div className="order-bar"><small className="muted">Manual order.</small><button className="secondary" onClick={reoptimize}>Re-optimize order</button></div>
-            )}
-          </div>
-
-        )}
-        <div className="trip-map"><TripMap {...mapProps} showCampsites={step === 2} /></div>
-        {step === 2 ? (
-            <aside className="pick-sidebar">
-              {selected && (
-                <CampsiteDetail
-                  c={selected} inTrip={tripCampsiteIds.has(selected.id)}
-                  onAdd={() => addCampsite(selected)} onRemove={() => removeCampsite(selected)}
-                  onStart={() => useAsStart(selected)} onEdit={() => props.openEditCampsite(selected)}
-                  onClose={() => setSelectedId(null)}
-                />
-              )}
+          {unassigned.length > 0 && (
+            <div className="unassigned">
               <div className="section-title">
-                <h3>Saved campsites in view</h3><span className="muted">{visibleCampsites.length} of {campsites.length}</span>
+                <h3>Camps without a night</h3>
+                <button className="secondary" disabled={ordering || !firstFreeNight(stops, nights)} onClick={orderAndFill}>
+                  {ordering ? "Ordering…" : "Order & fill nights"}
+                </button>
               </div>
-              {!campsites.length && <div className="empty">No saved campsites yet. Add some on the Campsites tab.</div>}
-              {campsites.length > 0 && !visibleCampsites.length && <div className="empty">No saved campsites in this part of the map. Pan or zoom out.</div>}
-              <ul className="visible-list">
-                {visibleCampsites.slice(0, 100).map((c) => {
-                  const inTrip = tripCampsiteIds.has(c.id);
-                  return (
-                    <li key={c.id} className={c.id === selectedId ? "selected" : ""}>
-                      <button className="row-main" onClick={() => pickCampsite(c)}>
-                        <strong>{c.favorite ? "★ " : ""}{c.name}</strong>
-                        <small>{[c.type, c.area, c.cost != null ? (c.cost === 0 ? "Free" : `$${c.cost}`) : ""].filter(Boolean).join(" · ")}</small>
-                      </button>
-                      {inTrip
-                        ? <button className="mini in" onClick={() => removeCampsite(c)} title="Remove from trip">✓ In trip</button>
-                        : <button className="mini" onClick={() => addCampsite(c)}>＋ Add</button>}
-                    </li>
-                  );
-                })}
-              </ul>
-              {visibleCampsites.length > 100 && <small className="muted">Showing the 100 closest to the map center. Zoom in to narrow the list.</small>}
-            </aside>
-        ) : null}
+              {unassigned.map((s, i) => (
+                <div className="dp-camp" key={`${s.campsite_id || s.name}-${i}`}>
+                  <div className="dp-camp-main"><button className="linklike strong" onClick={() => focusStop(s)}>{s.name}</button></div>
+                  <select value="" onChange={(e) => e.target.value && assignUnassigned(s, Number(e.target.value))}>
+                    <option value="">Night…</option>
+                    {Array.from({ length: nights }, (_, k) => k + 1).map((n) => (
+                      <option key={n} value={n}>{n}{campAt(stops, n) ? " (replace)" : ""}</option>
+                    ))}
+                  </select>
+                  <button aria-label={`Remove ${s.name}`} onClick={() => setStops((prev) => removeStopRef(prev, s))}>×</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="section-title">
+            <h3>Saved campsites in view</h3><span className="muted">{visibleCampsites.length} of {campsites.length}</span>
+          </div>
+          {!campsites.length && <div className="empty">No saved campsites yet. Add some on the Campsites tab.</div>}
+          {campsites.length > 0 && !visibleCampsites.length && <div className="empty">No saved campsites in this part of the map. Pan or zoom out.</div>}
+          <ul className="visible-list">
+            {visibleCampsites.slice(0, 100).map((c) => {
+              const mine = roles[c.id];
+              const campNights = (mine?.camp || []).filter((n) => n > 0);
+              return (
+                <li key={c.id} className={c.id === selectedId ? "selected" : ""}>
+                  <button className="row-main" onClick={() => pickCampsite(c)}>
+                    <strong>{c.favorite ? "★ " : ""}{c.name}</strong>
+                    <small>{[c.type, c.area, c.elevation_ft != null ? `${Math.round(c.elevation_ft).toLocaleString()} ft` : "", c.cost != null ? (c.cost === 0 ? "Free" : `$${c.cost}`) : ""].filter(Boolean).join(" · ")}</small>
+                  </button>
+                  {campNights.length
+                    ? <button className="mini in" onClick={() => pickCampsite(c)} title="Open its card">✓ Night {campNights.join(",")}</button>
+                    : <button className="mini" onClick={() => makeCamp(c, activeNight)}>＋ Night {activeNight}</button>}
+                </li>
+              );
+            })}
+          </ul>
+          {visibleCampsites.length > 100 && <small className="muted">Showing the 100 closest to the map center. Zoom in to narrow the list.</small>}
+        </aside>
       </div>
 
       <div className="trip-footer">
-        {step === 1
-          ? <button className="primary" onClick={() => setStep(2)}>Next: pick campsites on the map →</button>
-          : <button className="secondary" onClick={() => setStep(1)}>← Back to destinations</button>}
+        <div className="trip-summary">
+          {totalRun ? (
+            <span><b>{fmtMi(totalRun.distance / M_PER_MI)} mi</b> · {fmtHrs(totalRun.duration)} driving · {filled} of {nights} nights planned</span>
+          ) : routeBusy ? <span className="muted">Updating route…</span>
+            : <span className="muted">{filled} of {nights} nights planned{legs.length ? "" : ". Pick a camp for a night to build the route."}</span>}
+        </div>
         <div className="trip-footer-right">
           {props.fuelStopPlan && (
             <span className={props.fuelStopPlan.feasible ? "plan-chip ok" : "plan-chip bad"}>
               {props.fuelStopPlan.problem ? "Fuel plan needs attention" : props.fuelStopPlan.feasible ? `Fuel plan OK · ${props.fuelStopPlan.stops.length} stop${props.fuelStopPlan.stops.length === 1 ? "" : "s"}` : "Fuel gap on route"}
             </span>
           )}
-          <button className="secondary" disabled={props.routeLoading || stops.length < 1} onClick={props.calculateRoute}>
+          <button className="secondary" disabled={props.routeLoading || !props.hasRoute} onClick={props.calculateRoute}>
             {props.routeLoading ? "Calculating…" : "Calculate fuel plan"}
           </button>
           {props.fuelStopPlan && <button className="secondary" onClick={() => props.goTab("Fuel")}>View fuel plan</button>}
         </div>
       </div>
     </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-
-function StopList({
-  stops, startText, legs, hasStart, onMove, onRemove, compact,
-}: {
-  stops: TripStop[]; startText: string; legs: any[] | null; hasStart: boolean;
-  onMove: (from: number, to: number) => void; onRemove: (i: number) => void; compact?: boolean;
-}) {
-  const [drag, setDrag] = useState<number | null>(null);
-  const [over, setOver] = useState<number | null>(null);
-  const reset = () => { setDrag(null); setOver(null); };
-  if (!stops.length && !startText) return null;
-  return (
-    <ol className={compact ? "stop-list compact" : "stop-list"}>
-      {startText && (
-        <li className="stop-item start"><span className="badge start">S</span><div className="stop-body"><strong>{startText}</strong><small>Start</small></div></li>
-      )}
-      {stops.map((s, i) => {
-        const leg = legs?.[hasStart ? i : i - 1];
-        return (
-          <li
-            key={`${s.campsite_id || s.name}-${i}`}
-            className={`stop-item${drag === i ? " dragging" : ""}${over === i && drag !== null && drag !== i ? " over" : ""}`}
-            draggable
-            onDragStart={(e) => { setDrag(i); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(i)); }}
-            onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; if (over !== i) setOver(i); }}
-            onDrop={(e) => { e.preventDefault(); if (drag !== null) onMove(drag, i); reset(); }}
-            onDragEnd={reset}
-          >
-            <span className="grip" title="Drag to reorder" aria-hidden>⋮⋮</span>
-            <span className="badge">{i + 1}</span>
-            <div className="stop-body">
-              <strong>{s.campsite_id ? "⌂ " : ""}{s.name}</strong>
-              <small>
-                {s.campsite_id ? "Saved campsite" : "Destination"}
-                {leg?.distance != null ? ` · ${mi(leg.distance / MI)} mi, ${hrs(leg.duration)} from previous` : ""}
-              </small>
-            </div>
-            <div className="stop-actions">
-              <button aria-label="Move up" disabled={i === 0} onClick={() => onMove(i, i - 1)}>▲</button>
-              <button aria-label="Move down" disabled={i === stops.length - 1} onClick={() => onMove(i, i + 1)}>▼</button>
-              <button aria-label={`Remove ${s.name}`} onClick={() => onRemove(i)}>×</button>
-            </div>
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
-function PlaceSearch({
-  token, placeholder, proximity, campsites, defaultText, clearOnPick, onPickPlace, onPickCampsite, onClear,
-}: {
-  token: string | undefined; placeholder: string; proximity: PathPoint | null; campsites: TripCampsite[];
-  defaultText?: string; clearOnPick?: boolean;
-  onPickPlace: (p: PlaceResult) => void; onPickCampsite?: (c: TripCampsite) => void; onClear?: () => void;
-}) {
-  const [text, setText] = useState(defaultText || "");
-  const [results, setResults] = useState<PlaceResult[]>([]);
-  const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(0);
-  const lastDefault = useRef(defaultText || "");
-
-  // Reflect an externally changed value (e.g. a restored or chosen start).
-  useEffect(() => {
-    if ((defaultText || "") !== lastDefault.current) { lastDefault.current = defaultText || ""; setText(defaultText || ""); }
-  }, [defaultText]);
-
-  const q = text.trim().toLowerCase();
-  const campMatches = useMemo(
-    () => (!onPickCampsite || q.length < 2 ? [] : campsites.filter((c) => `${c.name} ${c.area || ""}`.toLowerCase().includes(q)).slice(0, 4)),
-    [campsites, q, onPickCampsite]
-  );
-
-  useEffect(() => {
-    if (!token || q.length < 2 || text === lastDefault.current) { setResults([]); return; }
-    const ctrl = new AbortController();
-    const t = setTimeout(async () => {
-      const r = await searchPlaces(text, token, proximity, ctrl.signal);
-      if (!ctrl.signal.aborted) { setResults(r); setActive(0); }
-    }, 300);
-    return () => { clearTimeout(t); ctrl.abort(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [text, token]);
-
-  const items: { key: string; label: string; sub: string; pick: () => void }[] = [
-    ...campMatches.map((c) => ({ key: `c-${c.id}`, label: `⌂ ${c.name}`, sub: `Saved campsite${c.area ? ` · ${c.area}` : ""}`, pick: () => onPickCampsite!(c) })),
-    ...results.map((p) => ({ key: `p-${p.id}`, label: p.name, sub: p.subtitle, pick: () => onPickPlace(p) })),
-  ];
-
-  function choose(i: number) {
-    const it = items[i];
-    if (!it) return;
-    it.pick();
-    setOpen(false);
-    if (clearOnPick) { setText(""); setResults([]); }
-  }
-
-  if (!token) return <div className="warning-box">Add NEXT_PUBLIC_MAPBOX_TOKEN to enable place search.</div>;
-  return (
-    <div className="place-search">
-      <input
-        value={text} placeholder={placeholder} autoComplete="off"
-        onChange={(e) => { setText(e.target.value); setOpen(true); if (!e.target.value && onClear) onClear(); }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        onKeyDown={(e) => {
-          if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(items.length - 1, a + 1)); }
-          else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(0, a - 1)); }
-          else if (e.key === "Enter") { e.preventDefault(); choose(active); }
-          else if (e.key === "Escape") setOpen(false);
-        }}
-      />
-      {open && items.length > 0 && (
-        <ul className="suggestions">
-          {items.map((it, i) => (
-            <li key={it.key} className={i === active ? "active" : ""} onMouseDown={(e) => { e.preventDefault(); choose(i); }} onMouseEnter={() => setActive(i)}>
-              <strong>{it.label}</strong><small>{it.sub}</small>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function CampsiteDetail({
-  c, inTrip, onAdd, onRemove, onStart, onEdit, onClose,
-}: {
-  c: TripCampsite; inTrip: boolean; onAdd: () => void; onRemove: () => void; onStart: () => void; onEdit: () => void; onClose: () => void;
-}) {
-  const maps = `https://www.google.com/maps/search/?api=1&query=${c.latitude},${c.longitude}`;
-  return (
-    <div className="camp-detail">
-      <div className="section-title">
-        <div><span className="eyebrow">{c.type || "CAMPSITE"}</span><h3>{c.favorite ? "★ " : ""}{c.name}</h3></div>
-        <button className="icon" aria-label="Close" onClick={onClose}>×</button>
-      </div>
-      <dl>
-        {c.area && <><dt>Area</dt><dd>{c.area}</dd></>}
-        {c.cost != null && <><dt>Cost</dt><dd>{c.cost === 0 ? "Free" : `$${c.cost}/night`}</dd></>}
-        {c.reservation && <><dt>Reservations</dt><dd>{c.reservation}</dd></>}
-        {c.rating != null && <><dt>Rating</dt><dd>{"★".repeat(Math.round(c.rating))}{"☆".repeat(Math.max(0, 5 - Math.round(c.rating)))}</dd></>}
-        {c.last_verified_at && <><dt>Verified</dt><dd>{c.last_verified_at}</dd></>}
-        {c.source && <><dt>Source</dt><dd>{c.source_url ? <a href={c.source_url} target="_blank" rel="noreferrer">{c.source}</a> : c.source}</dd></>}
-        <dt>Location</dt><dd>{c.latitude.toFixed(4)}, {c.longitude.toFixed(4)}</dd>
-      </dl>
-      {c.notes && <p className="camp-notes">{c.notes}</p>}
-      <div className="camp-actions">
-        {inTrip ? <button className="secondary" onClick={onRemove}>Remove from trip</button> : <button className="primary" onClick={onAdd}>Add to trip</button>}
-        <button className="secondary" onClick={onStart}>Use as start</button>
-        <a className="secondary linkbtn" href={maps} target="_blank" rel="noreferrer">Open in Google Maps</a>
-        <button className="secondary" onClick={onEdit}>Edit details</button>
-      </div>
-    </div>
   );
 }

@@ -4,36 +4,27 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import MapboxMap from "./map";
 import TripPlanner from "./trip-planner";
-import { STATE_NAMES, CA_REGIONS, extractPlaceCoordinates, regionFromFeature, usStateCode } from "@/lib/geo";
-import { cheapestInsertionIndex, pointsKey, stopsSaveKey, type PathPoint } from "@/lib/tripOrder";
+import CampsiteImporter, { type ImportCandidate } from "./campsite-importer";
+import CampForm from "./campsite-form";
+import { usStateCode } from "@/lib/geo";
+import { stopsSaveKey, type PathPoint } from "@/lib/tripOrder";
+import { fetchElevations } from "@/lib/elevation";
+import { dateRangeLabel, firstFreeNight, nightsBetween, renumber, type PlanStop } from "@/lib/tripPlan";
 import { MIN_ARRIVAL_RANGE_MILES, computeRange, findStationsAlongRoute, planFuelStops, type FuelStation, type FuelStopPlan } from "@/lib/fuel";
 
 type Campsite = {
   id: string; name: string; area: string; state: string; type: string; latitude: number; longitude: number;
   cost: number | null; reservation: string; rating: number | null; favorite: boolean;
-  notes: string; source: string; source_url: string; last_verified_at: string | null;
-};
-type ImportCandidate = {
-  key: string;
-  name: string;
-  area: string;
-  state: string;
-  type: string;
-  latitude: number | null;
-  longitude: number | null;
-  source_url: string;
-  notes: string;
-  selected: boolean;
-  status: "ready" | "needs-location" | "duplicate";
-  duplicateOf: string;
+  notes: string; source: string; source_url: string; last_verified_at: string | null; elevation_ft?: number | null;
 };
 
 type Trip = {
   id: string; name: string; start_location: string | null; destinations: string[];
   mpg: number | null; tank_gallons: number | null; fuel_reserve_percent: number;
   fuel_price_cushion: number; fuel_mileage_buffer: number; created_at: string;
+  start_date: string | null; end_date: string | null; end_location: string | null; daily_driving_hours: number | null;
 };
-type Stop = { id?: string; name: string; latitude: number; longitude: number; campsite_id?: string; stop_order: number; notes?: string };
+type Stop = PlanStop;
 type FuelSegment = {
   from: string; to: string; state: string; miles: number; price: number | null;
   planningPrice: number | null; gallons: number; cost: number | null;
@@ -62,33 +53,49 @@ export default function Home() {
   const [trips,setTrips]=useState<Trip[]>([]); const [tripName,setTripName]=useState("Yellowstone Adventure"); const [start,setStart]=useState("Kansas City, MO"); const [selectedTrip,setSelectedTrip]=useState<Trip|null>(null);
   const [mpg,setMpg]=useState(15); const [tank,setTank]=useState(36); const [reserve,setReserve]=useState(15); const [priceCushion,setPriceCushion]=useState(0.30); const [mileageBuffer,setMileageBuffer]=useState(10);
   const [stops,setStops]=useState<Stop[]>([]); const [routeLoading,setRouteLoading]=useState(false); const [route,setRoute]=useState<any>(null); const [fuelStations,setFuelStations]=useState<FuelStation[]>([]); const [fuelStopPlan,setFuelStopPlan]=useState<FuelStopPlan|null>(null);
-  const [tripStart,setTripStart]=useState(""); const [tripStartPoint,setTripStartPoint]=useState<PathPoint|null>(null); const [routeKey,setRouteKey]=useState("");
+  const [tripStart,setTripStart]=useState(""); const [tripStartPoint,setTripStartPoint]=useState<PathPoint|null>(null); const [routeKey,setRouteKey]=useState(""); const [routeWaypoints,setRouteWaypoints]=useState<PathPoint[]>([]);
+  const [newStartDate,setNewStartDate]=useState(""); const [newEndDate,setNewEndDate]=useState(""); const elevTried=useRef(new Set<string>());
   const lastSavedStops=useRef(""); const loadingStops=useRef(false); const saveQueue=useRef<Promise<void>>(Promise.resolve()); const [fuelPlan,setFuelPlan]=useState<FuelPlan|null>(null);
   const [budget,setBudget]=useState({camp:300,food:500,fees:100,other:200});
   const [pack,setPack]=useState(["Recovery boards","Air compressor","First aid kit","Headlamps","Water storage","Camp stove","Cooler","Tool kit"]);
   const [newPack,setNewPack]=useState("");
 
   useEffect(()=>{ const sb=createClient(); let mounted=true; sb.auth.getUser().then(({data})=>{if(mounted)setUserEmail(data.user?.email||"")}); const {data}=sb.auth.onAuthStateChange((_e,s)=>mounted&&setUserEmail(s?.user?.email||"")); return()=>{mounted=false;data.subscription.unsubscribe()}; },[]);
-  useEffect(()=>{ if(userEmail) { loadCampsites(); loadTrips(); } else { setCampsites([]); setTrips([]); setSelectedTrip(null); setStops([]); setRoute(null); setFuelPlan(null); setFuelStations([]); setFuelStopPlan(null); setRouteKey(""); setTripStart(""); setTripStartPoint(null); } },[userEmail]);
+  useEffect(()=>{ if(userEmail) { loadCampsites(); loadTrips(); } else { setCampsites([]); setTrips([]); setSelectedTrip(null); setStops([]); setRoute(null); setFuelPlan(null); setFuelStations([]); setFuelStopPlan(null); setRouteKey(""); setRouteWaypoints([]); setTripStart(""); setTripStartPoint(null); } },[userEmail]);
+
+  // Look up elevation once for any campsite that does not have it yet (new, imported, or older ones).
+  useEffect(()=>{
+    if(!userEmail)return;
+    const missing=campsites.filter(c=>c.elevation_ft==null&&!elevTried.current.has(c.id));
+    if(!missing.length)return;
+    missing.forEach(c=>elevTried.current.add(c.id));
+    (async()=>{
+      const found=await fetchElevations(missing.map(c=>({id:c.id,latitude:c.latitude,longitude:c.longitude})));
+      const ids=Object.keys(found);if(!ids.length)return;
+      setCampsites(prev=>prev.map(c=>found[c.id]!=null?{...c,elevation_ft:found[c.id]}:c));
+      const sb=createClient();await Promise.all(ids.map(id=>sb.from("campsites").update({elevation_ft:found[id]}).eq("id",id)));
+    })();
+  },[campsites,userEmail]);
 
   async function loadCampsites(){setLoadingCamps(true); const sb=createClient(); const {data,error}=await sb.from("campsites").select("*").order("name"); if(error){setMessage(error.message)} else setCampsites(data||[]); setLoadingCamps(false)}
-  async function loadTrips(){const sb=createClient(); const {data,error}=await sb.from("trips").select("id,name,start_location,destinations,mpg,tank_gallons,fuel_reserve_percent,fuel_price_cushion,fuel_mileage_buffer,created_at").order("created_at",{ascending:false}); if(error)setMessage(error.message); setTrips(data||[])}
+  async function loadTrips(){const sb=createClient(); const {data,error}=await sb.from("trips").select("id,name,start_location,destinations,mpg,tank_gallons,fuel_reserve_percent,fuel_price_cushion,fuel_mileage_buffer,created_at,start_date,end_date,end_location,daily_driving_hours").order("created_at",{ascending:false}); if(error)setMessage(error.message); setTrips(data||[])}
   async function selectTrip(t:Trip){
     setSelectedTrip(t);setMpg(t.mpg||15);setTank(t.tank_gallons||36);setReserve(t.fuel_reserve_percent??15);setPriceCushion(t.fuel_price_cushion??0.30);setMileageBuffer(t.fuel_mileage_buffer??10);
-    setRoute(null);setRouteKey("");clearFuel();setTripStart(t.start_location||"");setTripStartPoint(null);
+    setRoute(null);setRouteKey("");setRouteWaypoints([]);clearFuel();setTripStart(t.start_location||"");setTripStartPoint(null);
     loadingStops.current=true;setStops([]); // never autosave the previous trip's stops into this one
-    const {data,error}=await createClient().from("trip_stops").select("id,name,latitude,longitude,campsite_id,stop_order,notes").eq("trip_id",t.id).order("stop_order");
+    const {data,error}=await createClient().from("trip_stops").select("id,name,latitude,longitude,campsite_id,stop_order,notes,kind,night,day_number").eq("trip_id",t.id).order("stop_order");
     if(error)setMessage(error.message);
-    const rows=data||[];lastSavedStops.current=stopsSaveKey(rows);setStops(rows);loadingStops.current=false;
+    const rows=((data||[]) as any[]).map(r=>({...r,campsite_id:r.campsite_id||undefined,kind:r.kind||"camp"})) as Stop[];lastSavedStops.current=stopsSaveKey(rows);setStops(rows);loadingStops.current=false;
   }
   function clearFuel(){setFuelPlan(null);setFuelStations([]);setFuelStopPlan(null)}
   async function openTrip(t:Trip){await selectTrip(t);setTab("Trip")}
-  async function commitStart(text:string){
-    if(!selectedTrip)return;
-    const {data,error}=await createClient().from("trips").update({start_location:text||null}).eq("id",selectedTrip.id).select().single();
-    if(error){setMessage(error.message);return}
-    setSelectedTrip(data);setTrips(prev=>prev.map(x=>x.id===data.id?data:x));
+  async function updateTrip(patch:Partial<Trip>):Promise<boolean>{
+    if(!selectedTrip)return false;
+    const {data,error}=await createClient().from("trips").update(patch).eq("id",selectedTrip.id).select().single();
+    if(error){setMessage(error.message);return false}
+    setSelectedTrip(data);setTrips(prev=>prev.map(x=>x.id===data.id?data:x));return true;
   }
+  async function commitStart(text:string){await updateTrip({start_location:text||null})}
   async function auth(mode:"signin"|"signup"){setAuthBusy(true);setMessage("");const sb=createClient();const fn=mode==="signin"?sb.auth.signInWithPassword({email:authEmail,password:authPassword}):sb.auth.signUp({email:authEmail,password:authPassword});const {error}=await fn;if(error)setMessage(error.message);else {setMessage(mode==="signup"?"Account created. Check your email if confirmation is required.":"Signed in.");setAuthOpen(false)}setAuthBusy(false)}
   async function signOut(){await createClient().auth.signOut();setMessage("Signed out.")}
 
@@ -98,7 +105,7 @@ export default function Home() {
 
   function openNew(){setEditing(null);setShowCampForm(true)}
   function openEdit(c:Campsite){setEditing(c);setShowCampForm(true)}
-  async function saveCampsite(c:Campsite){if(!userEmail){setAuthOpen(true);return}const sb=createClient(); const payload={name:c.name,area:c.area||null,state:c.state||null,type:c.type,latitude:c.latitude,longitude:c.longitude,cost:c.cost,reservation:c.reservation,rating:c.rating,favorite:c.favorite,notes:c.notes,source:c.source,source_url:c.source_url,last_verified_at:c.last_verified_at||null}; const q=editing?sb.from("campsites").update(payload).eq("id",editing.id):sb.from("campsites").insert({...payload,user_id:(await sb.auth.getUser()).data.user?.id}).select().single(); const {error}=await q;if(error){setMessage(error.message);return}setShowCampForm(false);setMessage("Campsite saved.");loadCampsites()}
+  async function saveCampsite(c:Campsite){if(!userEmail){setAuthOpen(true);return}const sb=createClient(); let elev=c.elevation_ft??null;if(editing&&(editing.latitude!==c.latitude||editing.longitude!==c.longitude)&&Math.round(elev??-1)===Math.round(editing.elevation_ft??-1))elev=null;if(elev==null&&editing)elevTried.current.delete(editing.id); const payload={name:c.name,area:c.area||null,state:c.state||null,type:c.type,latitude:c.latitude,longitude:c.longitude,elevation_ft:elev,cost:c.cost,reservation:c.reservation,rating:c.rating,favorite:c.favorite,notes:c.notes,source:c.source,source_url:c.source_url,last_verified_at:c.last_verified_at||null}; const q=editing?sb.from("campsites").update(payload).eq("id",editing.id):sb.from("campsites").insert({...payload,user_id:(await sb.auth.getUser()).data.user?.id}).select().single(); const {error}=await q;if(error){setMessage(error.message);return}setShowCampForm(false);setMessage("Campsite saved.");loadCampsites()}
   async function deleteCampsite(c:Campsite){if(!confirm(`Delete ${c.name}?`))return;const {error}=await createClient().from("campsites").delete().eq("id",c.id);if(error)setMessage(error.message);else loadCampsites()}
   async function importCampsites(rows:ImportCandidate[]){
     if(!userEmail){setAuthOpen(true);return}
@@ -118,13 +125,15 @@ export default function Home() {
     await loadCampsites();
     setMessage(`${selected.length} campsite${selected.length===1?"":"s"} imported.`);
   }
-  async function createTrip(){if(!userEmail){setAuthOpen(true);return}const sb=createClient();const {data:user}=await sb.auth.getUser();const {data,error}=await sb.from("trips").insert({user_id:user.user?.id,name:tripName,start_location:start,destinations:[],mpg,tank_gallons:tank,fuel_reserve_percent:reserve,fuel_price_cushion:priceCushion,fuel_mileage_buffer:mileageBuffer}).select().single();if(error){setMessage(error.message);return}setTrips([data,...trips]);await selectTrip(data);setTab("Trip");setMessage("Trip created.")}
-  // "＋ Trip" on the Campsites list: add to the open trip at the cheapest spot, then show the Trip screen.
+  async function createTrip(){if(!userEmail){setAuthOpen(true);return}if(!newStartDate||!newEndDate){setMessage("Choose the trip's start and end dates first.");return}if(nightsBetween(newStartDate,newEndDate)<1){setMessage("The end date must be after the start date.");return}const sb=createClient();const {data:user}=await sb.auth.getUser();const {data,error}=await sb.from("trips").insert({user_id:user.user?.id,name:tripName,start_location:start,start_date:newStartDate,end_date:newEndDate,destinations:[],mpg,tank_gallons:tank,fuel_reserve_percent:reserve,fuel_price_cushion:priceCushion,fuel_mileage_buffer:mileageBuffer}).select().single();if(error){setMessage(error.message);return}setTrips([data,...trips]);await selectTrip(data);setTab("Trip");setMessage("Trip created.")}
+  // "＋ Trip" on the Campsites list: put the campsite on the first free night, then show the Trip screen.
   function addStop(c:Campsite){
     if(!selectedTrip){setMessage("Open or create a trip first, then add campsites to it.");setTab("Trips");return}
-    if(stops.some(x=>x.campsite_id===c.id)){setMessage(`${c.name} is already on this trip.`);setTab("Trip");return}
-    const idx=cheapestInsertionIndex(tripStartPoint,stops,c);
-    setStops([...stops.slice(0,idx),{name:c.name,latitude:c.latitude,longitude:c.longitude,campsite_id:c.id,stop_order:idx},...stops.slice(idx)].map((x,i)=>({...x,stop_order:i})));
+    if(stops.some(x=>x.campsite_id===c.id&&x.kind!=="daystop")){setMessage(`${c.name} is already on this trip.`);setTab("Trip");return}
+    const nights=nightsBetween(selectedTrip.start_date,selectedTrip.end_date);
+    const night=nights?firstFreeNight(stops,nights):null;
+    setStops(renumber([...stops,{name:c.name,latitude:c.latitude,longitude:c.longitude,campsite_id:c.id,stop_order:stops.length,kind:"camp",night,day_number:null}]));
+    setMessage(night?`${c.name} added as Night ${night}.`:`${c.name} added. Choose a night for it on the Trip tab.`);
     setTab("Trip");
   }
   // Saves the current stops. Saves are queued so overlapping autosaves never interleave delete/insert.
@@ -136,7 +145,7 @@ export default function Home() {
       const sb=createClient();
       const del=await sb.from("trip_stops").delete().eq("trip_id",tripId);
       if(del.error){setMessage(del.error.message);return}
-      const {error}=await sb.from("trip_stops").insert(list.map((st,i)=>({trip_id:tripId,campsite_id:st.campsite_id||null,name:st.name,latitude:st.latitude,longitude:st.longitude,stop_order:i,notes:st.notes||""})));
+      const {error}=await sb.from("trip_stops").insert(list.map((st,i)=>({trip_id:tripId,campsite_id:st.campsite_id||null,name:st.name,latitude:st.latitude,longitude:st.longitude,stop_order:i,notes:st.notes||"",kind:st.kind||"camp",night:st.night??null,day_number:st.day_number??null})));
       if(error){setMessage(error.message);return}
       lastSavedStops.current=key;if(!silent)setMessage("Trip stops saved.");
     });
@@ -169,17 +178,13 @@ export default function Home() {
   }
 
   async function calculateRoute(){
-    if(stops.length<1){setMessage("Add at least one campsite stop to calculate a route.");return}
     const token=process.env.NEXT_PUBLIC_MAPBOX_TOKEN;if(!token){setMessage("Add NEXT_PUBLIC_MAPBOX_TOKEN in Vercel to enable maps and routing.");return}
+    if(!route||routeWaypoints.length<2){setMessage("Choose at least one camp so the trip has a route to plan fuel for.");return}
     setRouteLoading(true);setMessage("");
     try {
-      const startPoint=tripStartPoint||(tripStart.trim()?await geocodeStart(tripStart.trim(),token):null);
-      const routePoints:any[]=startPoint?[startPoint,...stops]:stops;
-      if(routePoints.length<2)throw new Error("Add a starting point or at least two campsite stops.");
-      const coords=routePoints.map(s=>`${s.longitude},${s.latitude}`).join(";");
-      const res=await fetch(`https://api.mapbox.com/directions/v5/mapbox/driving/${coords}?geometries=geojson&overview=full&steps=false&access_token=${token}`);const data=await res.json();
-      if(!res.ok||data.code!=="Ok")throw new Error(data.message||"Mapbox routing failed.");
-      const currentRoute=data.routes?.[0];setRoute(currentRoute||null);setRouteKey(pointsKey(routePoints));
+      // The Trip screen routes each day on its own and hands over the joined route.
+      const routePoints:any[]=routeWaypoints;
+      const currentRoute=route;
       const geometry=currentRoute?.geometry;
       const vehicle={mpg,tankGallons:tank,reservePercent:reserve,mileageBufferPercent:mileageBuffer};
       // Station search runs alongside the state lookup and EIA price fetch below.
@@ -193,7 +198,7 @@ export default function Home() {
         const state=states[i+1]||states[i]||"";const priceInfo=priceMap.get(state);const miles=leg.distance/1609.344;const gallons=mpg>0?miles*(1+mileageBuffer/100)/mpg:0;const price=typeof priceInfo?.price==="number"?priceInfo.price:null;const planningPrice=price==null?null:price+priceCushion;return {from:routePoints[i]?.name||`Stop ${i+1}`,to:routePoints[i+1]?.name||`Stop ${i+2}`,state,miles,price,planningPrice,gallons,cost:planningPrice==null?null:gallons*planningPrice,source:priceInfo?.source||null,period:priceInfo?.period||null,geography:priceInfo?.geography||null};
       });
       const valid=segments.filter(s=>s.cost!=null);const bufferedMiles=segments.reduce((a,s)=>a+s.miles,0)*(1+mileageBuffer/100);const gallons=segments.reduce((a,s)=>a+s.gallons,0);const estimatedCost=valid.length===segments.length?segments.reduce((a,s)=>a+(s.cost||0),0):null;const baselinePrice=gallons?segments.reduce((a,s)=>a+(s.price||0)*s.gallons,0)/gallons:null;const planningPrice=gallons?segments.reduce((a,s)=>a+(s.planningPrice||0)*s.gallons,0)/gallons:null;
-      const warning=priceResponse&&!priceResponse.ok?"EIA pricing is not available yet. Add EIA_API_KEY in Vercel to calculate the fuel budget.":estimatedCost==null?"One or more route segments is missing a fuel price.":tripStart.trim()&&!startPoint?"Starting point could not be geocoded, so the route starts at the first campsite.":null;
+      const warning=priceResponse&&!priceResponse.ok?"EIA pricing is not available yet. Add EIA_API_KEY in Vercel to calculate the fuel budget.":estimatedCost==null?"One or more route segments is missing a fuel price.":null;
       if(stationSearch){
         const found=await stationSearch;
         let acc=0;const waypoints=(currentRoute?.legs||[]).map((leg:any,i:number)=>{acc+=leg.distance/1609.344;return {name:routePoints[i+1]?.name||`Stop ${i+2}`,mile:acc}});
@@ -216,8 +221,8 @@ export default function Home() {
     <div className="body"><aside className="sidebar">{["Dashboard","Trips","Trip","Campsites","Fuel","Budget","Pack List"].map(x=><button key={x} className={tab===x?"nav active":"nav"} onClick={()=>setTab(x as any)}><span>{x==="Campsites"?"⌂":x==="Fuel"?"⛽":x==="Budget"?"$":x==="Pack List"?"✓":x==="Trips"?"⌁":x==="Trip"?"⌖":"▦"}</span>{x}</button>)}<div className="side-note"><b>Our lane</b><span>Your campsites. Your route. Your fuel plan.</span></div></aside>
     <main className="main">
       {tab==="Dashboard"&&<Dashboard trips={trips} campsites={campsites} safeRange={safeRange} fuelBudget={fuelBudget} createTrip={()=>setTab("Trips")} />}
-      {tab==="Trips"&&<TripsView trips={trips} tripName={tripName} setTripName={setTripName} start={start} setStart={setStart} createTrip={createTrip} selectedTrip={selectedTrip} openTrip={openTrip}/>}
-      {tab==="Trip"&&(selectedTrip?<TripPlanner key={selectedTrip.id} tripName={selectedTrip.name} startText={tripStart} setStartText={setTripStart} startPoint={tripStartPoint} setStartPoint={setTripStartPoint} commitStart={commitStart} stops={stops} setStops={setStops} campsites={campsites} route={route} setRoute={setRoute} routeKey={routeKey} setRouteKey={setRouteKey} clearFuel={clearFuel} persistStops={saveStops} calculateRoute={calculateRoute} routeLoading={routeLoading} fuelStations={fuelStations} fuelStopPlan={fuelStopPlan} setMessage={setMessage} openEditCampsite={openEdit} goTab={(t:string)=>setTab(t as any)}/>:<section className="content"><div className="page-head"><div><span className="eyebrow">TRIP</span><h1>No trip open.</h1><p>Create a trip or open a saved one to plan its route and campsites.</p></div><button className="primary" onClick={()=>setTab("Trips")}>Go to Trips</button></div></section>)}
+      {tab==="Trips"&&<TripsView trips={trips} tripName={tripName} setTripName={setTripName} start={start} setStart={setStart} newStartDate={newStartDate} setNewStartDate={setNewStartDate} newEndDate={newEndDate} setNewEndDate={setNewEndDate} createTrip={createTrip} selectedTrip={selectedTrip} openTrip={openTrip}/>}
+      {tab==="Trip"&&(selectedTrip?<TripPlanner key={selectedTrip.id} trip={selectedTrip} updateTrip={updateTrip} startText={tripStart} setStartText={setTripStart} startPoint={tripStartPoint} setStartPoint={setTripStartPoint} commitStart={commitStart} stops={stops} setStops={setStops} campsites={campsites} hasRoute={!!route} routeKey={routeKey} setRoute={setRoute} setRouteKey={setRouteKey} setRouteWaypoints={setRouteWaypoints} clearFuel={clearFuel} persistStops={saveStops} calculateRoute={calculateRoute} routeLoading={routeLoading} fuelStations={fuelStations} fuelStopPlan={fuelStopPlan} setMessage={setMessage} openEditCampsite={openEdit} goTab={(t:string)=>setTab(t as any)}/>:<section className="content"><div className="page-head"><div><span className="eyebrow">TRIP</span><h1>No trip open.</h1><p>Create a trip or open a saved one to plan its route and campsites.</p></div><button className="primary" onClick={()=>setTab("Trips")}>Go to Trips</button></div></section>)}
       {tab==="Campsites"&&<section className="content"><div className="page-head"><div><span className="eyebrow">CAMPSITE LIBRARY</span><h1>Your campsites.</h1><p>Save the places you find elsewhere. Use them as primary stops or backups on future trips.</p></div><div className="page-head-actions"><button className="secondary" onClick={()=>setShowImporter(true)}>Import from Google Maps</button><button className="primary" onClick={openNew}>＋ Add campsite</button></div></div><div className="toolbar"><input placeholder="Search campsites..." value={search} onChange={e=>setSearch(e.target.value)}/><select value={areaFilter} onChange={e=>setAreaFilter(e.target.value)}>{areas.map(a=><option key={a}>{a}</option>)}</select><div className="seg"><button className={view==="list"?"selected":""} onClick={()=>setView("list")}>List</button><button className={view==="map"?"selected":""} onClick={()=>setView("map")}>Map</button></div></div>{!userEmail?<EmptyState title="Sign in to build your campsite library." action={()=>setAuthOpen(true)}/>:loadingCamps?<div className="loading">Loading campsites…</div>:view==="map"?<div className="map-card"><MapboxMap campsites={filtered} route={null} onSelect={openEdit}/></div>:<div className="table-card"><div className="table-head"><span>Campsite</span><span>Area</span><span>State / province</span><span>Type</span><span>Cost</span><span>Rating</span><span></span></div>{filtered.length?filtered.map(c=><div className="table-row" key={c.id}><div><strong>{c.favorite?"★ ":""}{c.name}</strong><small>{c.notes||"No notes yet"}</small></div><span>{c.area||"—"}</span><span>{c.state||"—"}</span><span>{c.type}</span><span>{c.cost==null?"—":c.cost===0?"Free":`$${c.cost}`}</span><span>{c.rating?"★".repeat(c.rating):"—"}</span><div className="row-actions"><button onClick={()=>addStop(c)}>＋ Trip</button><button onClick={()=>openEdit(c)}>Edit</button><button onClick={()=>deleteCampsite(c)}>Delete</button></div></div>):<div className="empty">No campsites match your filters.</div>}</div>}</section>}
       {tab==="Fuel"&&<FuelView mpg={mpg} setMpg={setMpg} tank={tank} setTank={setTank} reserve={reserve} setReserve={setReserve} priceCushion={priceCushion} setPriceCushion={setPriceCushion} mileageBuffer={mileageBuffer} setMileageBuffer={setMileageBuffer} safeRange={safeRange} fullRange={fullRange} route={route} stations={fuelStations} stopPlan={fuelStopPlan} plan={fuelPlan} selectedTrip={selectedTrip} saveSettings={saveVehicleSettings}/>} 
       {tab==="Budget"&&<BudgetView budget={budget} setBudget={setBudget} fuelBudget={fuelBudget} fuelPlan={fuelPlan}/>} 
@@ -227,9 +232,9 @@ export default function Home() {
   </div>
 }
 
-function Dashboard({trips,campsites,safeRange,fuelBudget,createTrip}:any){return <section className="content"><div className="hero"><span className="eyebrow">OVERLAND PLANNER 0.7</span><h1>Plan the trip.<br/><i>Not everything else.</i></h1><p>A focused workspace for the parts of overlanding that are hardest to keep straight: campsites, routes, fuel and budget.</p><button className="primary" onClick={createTrip}>Build a trip</button></div><div className="stat-grid"><Stat n={trips.length} label="Saved trips"/><Stat n={campsites.length} label="Saved campsites"/><Stat n={`${safeRange} mi`} label="Current safe range"/><Stat n={fuelBudget?`$${Math.round(fuelBudget).toLocaleString()}`:"—"} label="Current fuel budget"/></div><div className="three"><Card title="Campsite library" text="Keep your own list of primary and backup campsites, with coordinates ready for routing."/><Card title="Fuel planning" text="Use current EIA averages, then deliberately add a price cushion and mileage reserve so the budget is conservative."/><Card title="Simple budget" text="Fuel becomes route-driven. Camping, food, park fees and everything else stay editable."/></div></section>}
+function Dashboard({trips,campsites,safeRange,fuelBudget,createTrip}:any){return <section className="content"><div className="hero"><span className="eyebrow">OVERLAND PLANNER 0.8</span><h1>Plan the trip.<br/><i>Not everything else.</i></h1><p>A focused workspace for the parts of overlanding that are hardest to keep straight: campsites, routes, fuel and budget.</p><button className="primary" onClick={createTrip}>Build a trip</button></div><div className="stat-grid"><Stat n={trips.length} label="Saved trips"/><Stat n={campsites.length} label="Saved campsites"/><Stat n={`${safeRange} mi`} label="Current safe range"/><Stat n={fuelBudget?`$${Math.round(fuelBudget).toLocaleString()}`:"—"} label="Current fuel budget"/></div><div className="three"><Card title="Campsite library" text="Keep your own list of primary and backup campsites, with coordinates ready for routing."/><Card title="Fuel planning" text="Use current EIA averages, then deliberately add a price cushion and mileage reserve so the budget is conservative."/><Card title="Simple budget" text="Fuel becomes route-driven. Camping, food, park fees and everything else stay editable."/></div></section>}
 
-function TripsView({trips,tripName,setTripName,start,setStart,createTrip,selectedTrip,openTrip}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">TRIPS</span><h1>Plan a trip.</h1><p>Create a trip, then set your destinations and pick campsites from your saved map.</p></div></div><div className="trip-builder"><div className="form-card"><h3>New trip</h3><label>Trip name<input value={tripName} onChange={e=>setTripName(e.target.value)}/></label><label>Starting point<input value={start} onChange={e=>setStart(e.target.value)}/></label><button className="primary" onClick={createTrip}>Create trip</button></div><div className="form-card"><h3>Saved trips</h3>{trips.length?trips.map((t:Trip)=><button className={selectedTrip?.id===t.id?"trip-item selected":"trip-item"} key={t.id} onClick={()=>openTrip(t)}><strong>{t.name}</strong><small>{t.start_location||"No start"}</small></button>):<div className="empty">No saved trips yet.</div>}</div></div></section>}
+function TripsView({trips,tripName,setTripName,start,setStart,newStartDate,setNewStartDate,newEndDate,setNewEndDate,createTrip,selectedTrip,openTrip}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">TRIPS</span><h1>Plan a trip.</h1><p>Create a trip, then set your destinations and pick campsites from your saved map.</p></div></div><div className="trip-builder"><div className="form-card"><h3>New trip</h3><label>Trip name<input value={tripName} onChange={e=>setTripName(e.target.value)}/></label><label>Starting point<input value={start} onChange={e=>setStart(e.target.value)}/></label><div className="date-pair"><label>Start date<input type="date" value={newStartDate} onChange={e=>setNewStartDate(e.target.value)}/></label><label>End date<input type="date" min={newStartDate||undefined} value={newEndDate} onChange={e=>setNewEndDate(e.target.value)}/></label></div><small className="muted">{nightsBetween(newStartDate,newEndDate)>0?`${nightsBetween(newStartDate,newEndDate)} night${nightsBetween(newStartDate,newEndDate)===1?"":"s"} · the trip ends back at the starting point.`:"Pick both dates to see how many nights this trip has."}</small><button className="primary full" onClick={createTrip}>Create trip</button></div><div className="form-card"><h3>Saved trips</h3>{trips.length?trips.map((t:Trip)=><button className={selectedTrip?.id===t.id?"trip-item selected":"trip-item"} key={t.id} onClick={()=>openTrip(t)}><strong>{t.name}</strong><small>{[t.start_location||"No start",t.start_date&&t.end_date?dateRangeLabel(t.start_date,t.end_date):""].filter(Boolean).join(" · ")}</small></button>):<div className="empty">No saved trips yet.</div>}</div></div></section>}
 
 function FuelView({mpg,setMpg,tank,setTank,reserve,setReserve,priceCushion,setPriceCushion,mileageBuffer,setMileageBuffer,safeRange,fullRange,route,stations,stopPlan,plan,selectedTrip,saveSettings}:any){const miles=route?Math.round(route.distance/1609.344):0;const hours=route?Math.round(route.duration/3600*10)/10:0;return <section className="content"><div className="page-head"><div><span className="eyebrow">FUEL</span><h1>Build a conservative fuel budget.</h1><p>EIA provides the baseline. Your cushion and mileage reserve keep the trip budget from being too optimistic.</p></div></div><div className="fuel-grid"><div className="form-card"><h3>Vehicle & budget cushion</h3><label>MPG<input type="number" min="1" step="0.1" value={mpg} onChange={e=>setMpg(Number(e.target.value))}/></label><label>Tank gallons<input type="number" min="1" step="0.1" value={tank} onChange={e=>setTank(Number(e.target.value))}/></label><label>Tank reserve %<input type="number" min="0" max="50" step="1" value={reserve} onChange={e=>setReserve(Number(e.target.value))}/></label><label>Fuel price cushion / gallon<input type="number" min="0" step="0.05" value={priceCushion} onChange={e=>setPriceCushion(Number(e.target.value))}/></label><label>Mileage reserve %<input type="number" min="0" max="50" step="1" value={mileageBuffer} onChange={e=>setMileageBuffer(Number(e.target.value))}/></label><div className="big-number">{safeRange}<small>practical miles before reserve</small></div><span className="muted">{fullRange} miles at a full tank</span>{selectedTrip&&<button className="secondary full" onClick={saveSettings}>Save vehicle settings to this trip</button>}</div><div className="form-card"><h3>Current route</h3>{route?<><div className="metric-line"><span>Distance</span><b>{miles.toLocaleString()} mi</b></div><div className="metric-line"><span>Drive time</span><b>{hours} hr</b></div>{plan?.warning&&<div className="warning-box">{plan.warning}</div>}{plan?.estimatedCost!=null?<><div className="fuel-budget-number">${Math.round(plan.estimatedCost).toLocaleString()}<small>recommended fuel budget</small></div><div className="metric-line"><span>Route miles + reserve</span><b>{Math.round(plan.bufferedMiles).toLocaleString()} mi</b></div><div className="metric-line"><span>Planning gallons</span><b>{plan.gallons.toFixed(1)} gal</b></div><div className="metric-line"><span>Weighted EIA baseline</span><b>${plan.baselinePrice?.toFixed(2)}/gal</b></div><div className="metric-line"><span>Weighted planning price</span><b>${plan.planningPrice?.toFixed(2)}/gal</b></div><p className="muted">Planning price = EIA baseline + ${priceCushion.toFixed(2)}/gal. Mileage reserve is {mileageBuffer}%.</p></>:<div className="empty">Calculate the route again to generate the fuel budget.</div>}</>:<div className="empty">Calculate a route from the Trips page first.</div>}</div></div>{plan?.segments?.length>0&&<div className="fuel-segments"><div className="section-title"><div><span className="eyebrow">ROUTE LEGS</span><h2>Fuel cost by leg</h2></div><span className="muted">EIA weekly retail averages{plan.priceDate?` · week ${plan.priceDate}`:""}</span></div>{plan.segments.map((s:FuelSegment,i:number)=><div className="fuel-segment" key={`${s.from}-${s.to}-${i}`}><div><strong>{s.from} → {s.to}</strong><small>{s.state||"State unavailable"} · {Math.round(s.miles).toLocaleString()} route mi · {s.source||"No EIA price"}</small></div><div className="fuel-segment-right"><span>{s.price==null?"—":`$${s.price.toFixed(2)}/gal`}</span><b>{s.cost==null?"—":`$${Math.round(s.cost).toLocaleString()}`}</b></div></div>)}</div>}<FuelStopsCard stations={stations} stopPlan={stopPlan} route={route}/></section>}
 
@@ -255,178 +260,6 @@ function BudgetView({budget,setBudget,fuelBudget,fuelPlan}:any){const nonFuel=Ob
 
 function PackView({pack,setPack,newPack,setNewPack}:any){return <section className="content"><div className="page-head"><div><span className="eyebrow">PACK LIST</span><h1>Reuse your loadout.</h1><p>A simple checklist. Nothing more.</p></div></div><div className="pack-card"><div className="add-row"><input placeholder="Add item" value={newPack} onChange={e=>setNewPack(e.target.value)}/><button className="primary" onClick={()=>{if(newPack.trim()){setPack([...pack,newPack.trim()]);setNewPack("")}}}>Add</button></div>{pack.map((x:string,i:number)=><label className="check" key={`${x}-${i}`}><input type="checkbox"/><span>{x}</span></label>)}</div></section>}
 
-function CampsiteImporter({existing,onClose,onImport}:{existing:Campsite[];onClose:()=>void;onImport:(rows:ImportCandidate[])=>void}){
-  const [rows,setRows]=useState<ImportCandidate[]>([]);
-  const [busy,setBusy]=useState(false);
-  const [error,setError]=useState("");
-  const [fileName,setFileName]=useState("");
-  const token=process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
-  async function handleFiles(files:File[]){
-    setBusy(true);setError("");setFileName(files.map(f=>f.name).join(", "));
-    try{
-      const parsedGroups=await Promise.all(files.map(async file=>({file,rows:parseCsv(await file.text())})));
-      const parsed: Array<Record<string,string> & {__sourceFile:string}> = parsedGroups.reduce((all,g)=>{
-        return all.concat(g.rows.map((r:Record<string,string>)=>({...r,__sourceFile:g.file.name})));
-      }, [] as Array<Record<string,string> & {__sourceFile:string}>);
-      if(!parsed.length)throw new Error("No saved places were found in those CSV files.");
-      const candidates=parsed.map((r,i)=>{
-        const name=(r.title||r.name||r.saved_place||r.place||r.label||`Saved place ${i+1}`).trim();
-        const url=(r.url||r.link||r.google_maps_url||r.google_maps_link||"").trim();
-        const note=(r.note||r.notes||r.description||"").trim();
-        const coords=extractPlaceCoordinates(name,url);
-        return {key:`${i}-${name}-${url}`,name,area:"",state:"",type:"Other",latitude:coords?.latitude??null,longitude:coords?.longitude??null,source_url:url,notes:note,selected:true,status:(coords?"ready":"needs-location") as ImportCandidate["status"],duplicateOf:""};
-      });
-      let next=candidates;
-      if(token){
-        // Resolve missing coordinates first. State is derived only from the
-        // final coordinates. Area is intentionally left blank for you to enter
-        // later because geocoded city/place names are not reliable enough for
-        // the personal area label we want in the campsite library.
-        next=await geocodeMissing(next,token);
-        next=await reverseGeocodeStates(next,token);
-      }
-      // Duplicates are checked last, once every row has its final coordinates.
-      next=markDuplicates(next,existing);
-      setRows(next);
-    }catch(e:any){setError(e?.message||"Could not read that CSV.")}
-    finally{setBusy(false)}
-  }
-
-  async function geocodeMissing(input:ImportCandidate[],mapboxToken:string){
-    // Search Box (not the v6 geocoder) is the API that knows about points of
-    // interest such as campgrounds and recreation areas.
-    const output=[...input];
-    const todo=output.map((r,i)=>({r,i})).filter(x=>x.r.latitude==null||x.r.longitude==null);
-    let cursor=0;
-    async function worker(){
-      while(cursor<todo.length){
-        const {r,i}=todo[cursor++];
-        try{
-          const q=encodeURIComponent(r.name.slice(0,250));
-          const response=await fetch(`https://api.mapbox.com/search/searchbox/v1/forward?q=${q}&limit=1&types=poi,address,place,locality&access_token=${mapboxToken}`);
-          if(!response.ok)continue;
-          const data=await response.json();const coords=data.features?.[0]?.geometry?.coordinates;
-          if(Array.isArray(coords)&&coords.length===2&&Number.isFinite(coords[0])&&Number.isFinite(coords[1])){
-            output[i]={...r,latitude:Number(coords[1]),longitude:Number(coords[0]),status:"ready"};
-          }
-        }catch{}
-      }
-    }
-    await Promise.all(Array.from({length:Math.min(5,todo.length)},worker));
-    return output;
-  }
-
-  async function reverseGeocodeStates(input:ImportCandidate[],mapboxToken:string){
-    // State always comes from the final coordinates. Mapbox batch requests are
-    // capped at 50 queries. Reverse lookups take one type when limit is used, so
-    // try the state/province polygon first, then county/district and place (both carry the region).
-    const output=[...input];
-    for(const type of ["region","district","place"]){
-      const targets=output.map((r,index)=>({r,index})).filter(x=>x.r.latitude!=null&&x.r.longitude!=null&&!x.r.state);
-      for(let start=0;start<targets.length;start+=50){
-        const chunk=targets.slice(start,start+50);
-        try{
-          const body=chunk.map(({r})=>({types:[type],longitude:r.longitude,latitude:r.latitude,limit:1}));
-          const response=await fetch(`https://api.mapbox.com/search/geocode/v6/batch?access_token=${mapboxToken}`,{
-            method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)
-          });
-          if(!response.ok)continue;
-          const data=await response.json();
-          (Array.isArray(data.batch)?data.batch:[]).forEach((result:any,j:number)=>{
-            const target=chunk[j];if(!target)return;
-            const state=regionFromFeature(result?.features?.[0]).region;
-            if(state)output[target.index]={...output[target.index],state};
-          });
-        }catch{}
-      }
-    }
-    return output;
-  }
-
-  const update=(key:string,patch:Partial<ImportCandidate>)=>setRows(prev=>{
-    const next=prev.map(r=>r.key===key?{...r,...patch}:r);
-    if(!("name" in patch||"latitude" in patch||"longitude" in patch))return next;
-    const i=next.findIndex(r=>r.key===key);
-    // Label only; the checkbox stays wherever the user put it.
-    next[i]={...next[i],duplicateOf:findDuplicate(next[i],existing,next.slice(0,i))};
-    return next;
-  });
-  const remove=(key:string)=>setRows(prev=>prev.filter(r=>r.key!==key));
-  const selectedCount=rows.filter(r=>r.selected&&r.latitude!=null&&r.longitude!=null).length;
-  const duplicates=rows.filter(r=>r.duplicateOf).length;
-  const unresolved=rows.filter(r=>r.latitude==null||r.longitude==null).length;
-
-  return <div className="modal-backdrop"><div className="modal importer-modal">
-    <div className="modal-head"><div><span className="eyebrow">CAMPSITE IMPORTER</span><h2>Bring in your Google Maps saves.</h2><p className="muted">Export your Google Maps Saved list as a CSV, upload it here, review the places, then import only the campsites you want to keep.</p></div><button onClick={onClose}>×</button></div>
-    {!rows.length&&<div className="import-drop"><div className="import-icon">↓</div><h3>Upload your Google Maps CSV</h3><p>Google Takeout → Saved → download the CSV files, then choose one or several here.</p><label className="upload-button">Choose CSV files<input type="file" multiple accept=".csv,text/csv" onChange={e=>{const files=Array.from(e.target.files||[]) as File[];if(files.length)handleFiles(files)}}/></label>{fileName&&<span className="muted">{fileName}</span>}{error&&<div className="warning-box">{error}</div>}</div>}
-    {busy&&<div className="loading">Reading your saved places and locating anything that needs coordinates…</div>}
-    {rows.length>0&&!busy&&<>
-      <div className="import-summary"><div><strong>{rows.length}</strong><span>saved places found</span></div><div><strong>{selectedCount}</strong><span>ready to import</span></div><div><strong>{duplicates}</strong><span>possible duplicates</span></div><div><strong>{unresolved}</strong><span>need a location</span></div></div>
-      <div className="import-note"><strong>Review before importing.</strong> State, province or territory is calculated from the campsite coordinates (worldwide). Area is intentionally left blank for you to fill in later. Places that aren't campsites can be removed with <b>Skip</b>. You can also edit the name, area, state, type, or coordinates before importing.</div>
-      <datalist id="region-options">{[...Object.keys(STATE_NAMES),...CA_REGIONS].map(n=><option key={n} value={n}/>)}</datalist>
-      <div className="import-list">{rows.map(r=><div className={`import-row ${r.selected?"":"skipped"}`} key={r.key}>
-        <div className="import-check"><input type="checkbox" checked={r.selected} onChange={e=>update(r.key,{selected:e.target.checked})}/></div>
-        <div className="import-fields">
-          <div className="import-grid"><label>Name<input value={r.name} onChange={e=>update(r.key,{name:e.target.value})}/></label><label>Area / region<input value={r.area} onChange={e=>update(r.key,{area:e.target.value})}/></label><label>State / province<input list="region-options" value={r.state} placeholder="Auto from coordinates" onChange={e=>update(r.key,{state:e.target.value})}/></label><label>Type<select value={r.type} onChange={e=>update(r.key,{type:e.target.value})}><option>Other</option><option>Dispersed</option><option>Developed</option><option>Forest campground</option><option>Private campground</option></select></label><label>Latitude<input type="number" step="any" value={r.latitude??""} onChange={e=>update(r.key,{latitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label><label>Longitude<input type="number" step="any" value={r.longitude??""} onChange={e=>update(r.key,{longitude:e.target.value===""?null:Number(e.target.value),status:e.target.value===""?"needs-location":"ready"})}/></label></div>
-          <div className="import-meta"><span className={r.latitude!=null&&r.longitude!=null?"ready-text":"needs-text"}>{r.latitude!=null&&r.longitude!=null?"Location ready":"Location needed"}</span>{r.duplicateOf&&<span className="dup-text">Possible duplicate of {r.duplicateOf}</span>}{r.source_url&&<a href={r.source_url} target="_blank" rel="noreferrer">Open Google Maps ↗</a>}</div>
-        </div>
-        <button className="skip-button" onClick={()=>remove(r.key)}>Skip</button>
-      </div>)}</div>
-      <div className="modal-actions"><button onClick={onClose}>Cancel</button><button className="secondary" onClick={()=>setRows([])}>Choose a different CSV</button><button className="primary" disabled={!selectedCount} onClick={()=>onImport(rows)}>Import {selectedCount} campsite{selectedCount===1?"":"s"}</button></div>
-    </>}
-  </div></div>
-}
-
-function parseCsv(text:string):Record<string,string>[]{
-  const rows:string[][]=[];let row:string[]=[];let cell="";let quoted=false;
-  for(let i=0;i<text.length;i++){
-    const ch=text[i];
-    if(ch==='"'){
-      if(quoted&&text[i+1]==='"'){cell+='"';i++}else quoted=!quoted;
-    }else if(ch===','&&!quoted){row.push(cell);cell=""}
-    else if((ch==='\n'||ch==='\r')&&!quoted){if(ch==='\r'&&text[i+1]==='\n')i++;row.push(cell);cell="";if(row.some(x=>x.trim()!==""))rows.push(row);row=[]}
-    else cell+=ch;
-  }
-  if(cell!==""||row.length){row.push(cell);if(row.some(x=>x.trim()!==""))rows.push(row)}
-  if(rows.length<2)return [];
-  const headers=rows[0].map(h=>h.trim().toLowerCase().replace(/^"|"$/g,""));
-  return rows.slice(1).map(values=>Object.fromEntries(headers.map((h,i)=>[h,(values[i]??"").trim()])));
-}
-
-const DUP_MILES=0.05; // about 80 m
-
-/**
- * Describes what a row duplicates, or "" if nothing. Checks the saved library
- * (same name or same spot) and rows earlier in this import (same spot, or the
- * same name when either row has no coordinates), so the first copy is kept.
- */
-function findDuplicate(row:ImportCandidate,existing:Campsite[],earlier:ImportCandidate[]):string{
-  const name=row.name.trim().toLowerCase();
-  const hasCoords=row.latitude!=null&&row.longitude!=null&&Number.isFinite(row.latitude)&&Number.isFinite(row.longitude);
-  const here:[number,number]|null=hasCoords?[row.longitude as number,row.latitude as number]:null;
-  for(const c of existing){
-    if(here&&haversineMiles(here,[c.longitude,c.latitude])<DUP_MILES)return `${c.name} (already in your library)`;
-    if(name&&c.name.trim().toLowerCase()===name)return `${c.name} (same name in your library)`;
-  }
-  for(const o of earlier){
-    if(o.key===row.key)continue;
-    const oHas=o.latitude!=null&&o.longitude!=null;
-    if(here&&oHas&&haversineMiles(here,[o.longitude as number,o.latitude as number])<DUP_MILES)return `${o.name} (earlier in this import)`;
-    if(name&&(!here||!oHas)&&o.name.trim().toLowerCase()===name)return `${o.name} (earlier in this import)`;
-  }
-  return "";
-}
-
-function markDuplicates(rows:ImportCandidate[],existing:Campsite[]):ImportCandidate[]{
-  return rows.map((r,i)=>{
-    const duplicateOf=findDuplicate(r,existing,rows.slice(0,i));
-    return duplicateOf?{...r,duplicateOf,selected:false,status:"duplicate" as const}:{...r,duplicateOf:""};
-  });
-}
-
-
-function CampForm({initial,onClose,onSave,onDelete}:any){const blank={name:"",area:"",state:"",type:"Dispersed",latitude:"",longitude:"",cost:"",reservation:"",rating:"",favorite:false,notes:"",source:"",source_url:"",last_verified_at:""};const [f,setF]=useState<any>(initial?{...initial,latitude:String(initial.latitude),longitude:String(initial.longitude),cost:initial.cost==null?"":String(initial.cost),rating:initial.rating==null?"":String(initial.rating)}:blank);const set=(k:string,v:any)=>setF((p:any)=>({...p,[k]:v}));return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><span className="eyebrow">CAMPSITE</span><h2>{initial?"Edit campsite":"Add campsite"}</h2></div><button onClick={onClose}>×</button></div><div className="form-grid">{[["name","Name"],["area","Area / region"],["state","State / province"],["latitude","Latitude"],["longitude","Longitude"],["cost","Cost / night"],["rating","Your rating 1–5"],["reservation","Reservation / access"],["source","Source"]].map(([k,l])=><label key={k}>{l}<input value={f[k]||""} readOnly={k==="state"} onChange={e=>set(k,e.target.value)} /></label>)}</div><label>Type<select value={f.type} onChange={e=>set("type",e.target.value)}><option>Dispersed</option><option>Developed</option><option>Forest campground</option><option>Private campground</option><option>Other</option></select></label><label>Notes<textarea value={f.notes} onChange={e=>set("notes",e.target.value)} /></label><label>Source URL<input value={f.source_url} onChange={e=>set("source_url",e.target.value)} /></label><label>Last verified<input type="date" value={f.last_verified_at||""} onChange={e=>set("last_verified_at",e.target.value)}/></label><label className="check"><input type="checkbox" checked={f.favorite} onChange={e=>set("favorite",e.target.checked)}/><span>Favorite / preferred campsite</span></label><div className="modal-actions">{initial&&<button className="danger-button" onClick={()=>{onDelete(initial);onClose()}}>Delete campsite</button>}<button onClick={onClose}>Cancel</button><button className="primary" onClick={()=>onSave({...f,latitude:Number(f.latitude),longitude:Number(f.longitude),cost:f.cost===""?null:Number(f.cost),rating:f.rating===""?null:Number(f.rating)})}>Save campsite</button></div></div></div>}
 function AuthModal({email,password,setEmail,setPassword,busy,onClose,onSignIn,onSignUp}:any){return <div className="modal-backdrop"><div className="modal auth"><div className="modal-head"><div><span className="eyebrow">ACCOUNT</span><h2>Save your planner.</h2></div><button onClick={onClose}>×</button></div><label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)}/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)}/></label><div className="modal-actions"><button disabled={busy} onClick={onSignIn}>Sign in</button><button className="primary" disabled={busy} onClick={onSignUp}>Create account</button></div></div></div>}
 function Stat({n,label}:any){return <div className="stat"><strong>{n}</strong><span>{label}</span></div>};function Card({title,text}:any){return <div className="feature-card"><h3>{title}</h3><p>{text}</p></div>};function EmptyState({title,action}:any){return <div className="empty"><strong>{title}</strong><button onClick={action}>Sign in</button></div>}
-function haversineMiles(a:[number,number],b:[number,number]){const r=3958.7613;const dLat=(b[1]-a[1])*Math.PI/180;const dLon=(b[0]-a[0])*Math.PI/180;const lat1=a[1]*Math.PI/180;const lat2=b[1]*Math.PI/180;const x=Math.sin(dLat/2)**2+Math.sin(dLon/2)**2*Math.cos(lat1)*Math.cos(lat2);return 2*r*Math.asin(Math.sqrt(x))}

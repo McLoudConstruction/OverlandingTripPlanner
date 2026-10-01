@@ -270,6 +270,10 @@ export function legMiles(leg: any) {
 }
 
 /** Key used to tell whether the stops on screen differ from what was last saved. */
-export function stopsSaveKey(stops: { campsite_id?: string | null; latitude: number; longitude: number }[]): string {
-  return stops.map((s) => `${s.campsite_id || ""}|${s.latitude}|${s.longitude}`).join("~");
+export function stopsSaveKey(
+  stops: { campsite_id?: string | null; latitude: number; longitude: number; kind?: string; night?: number | null; day_number?: number | null }[]
+): string {
+  return stops
+    .map((s) => `${s.campsite_id || ""}|${s.latitude}|${s.longitude}|${s.kind || "camp"}|${s.night ?? ""}|${s.day_number ?? ""}`)
+    .join("~");
 }
